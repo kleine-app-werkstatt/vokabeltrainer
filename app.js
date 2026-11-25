@@ -10,6 +10,7 @@
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
+const APP_VERSION = '25.11.2026 e'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
@@ -844,6 +845,303 @@ function oddLetters(text, lang) {
   return [...text.toLowerCase()].some((ch) => /\p{L}/u.test(ch) && !allowed.test(ch));
 }
 
+/* ---------- Tabellen-Erkennung (Schulbuch-Vokabelseiten mit Linien) ----------
+   Fotos von Buchseiten sind oft schräg oder gewölbt. Statt Tesseract-Zeilen zu nutzen,
+   werden die Tabellenlinien gesucht: Ihr Verlauf zeigt, welche Wörter in dieselbe Zeile gehören.
+   Danach werden die Linien aus dem Bild entfernt, damit sie nicht als Text gelesen werden. */
+function analyzeTable(canvas) {
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.getImageData(0, 0, W, H);
+  const px = img.data;
+  const N = W * H;
+  const g = new Uint8Array(N);
+  for (let i = 0; i < N; i++) g[i] = px[i * 4];
+  // Dunkle Pixel relativ zum örtlichen Hintergrund (ungleichmäßiges Licht)
+  const IW = W + 1;
+  const I = new Float64Array(IW * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let row = 0;
+    for (let x = 0; x < W; x++) { row += g[y * W + x]; I[(y + 1) * IW + x + 1] = I[y * IW + x + 1] + row; }
+  }
+  const R = Math.max(12, Math.round(W / 90));
+  const D = new Uint8Array(N);
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - R), y1 = Math.min(H, y + R + 1);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - R), x1 = Math.min(W, x + R + 1);
+      const sum = I[y1 * IW + x1] - I[y0 * IW + x1] - I[y1 * IW + x0] + I[y0 * IW + x0];
+      const mean = sum / ((y1 - y0) * (x1 - x0));
+      D[y * W + x] = g[y * W + x] < mean - 18 ? 1 : 0;
+    }
+  }
+  // Linien-Kandidaten: lange waagerechte dunkle Strecken (± 1 Pixel für schräge Linien)
+  const L = Math.max(40, Math.round(W * 0.03));
+  const M = new Uint8Array(N);
+  const pref = new Int32Array(W + 1);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      pref[x + 1] = pref[x] + (D[i] | D[i - W] | D[i + W]);
+    }
+    const need = Math.floor(0.92 * L);
+    let mark = -1;
+    for (let x = 0; x + L <= W; x++) {
+      if (pref[x + L] - pref[x] >= need) mark = x + L;
+      if (x < mark) M[y * W + x] = 1;
+    }
+  }
+  // Zusammenhängende Linien suchen (verkleinertes Raster), nur breite behalten
+  const s = 4, GW = Math.ceil(W / s), GH = Math.ceil(H / s);
+  const G = new Uint8Array(GW * GH);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (M[y * W + x]) G[((y / s) | 0) * GW + ((x / s) | 0)] = 1;
+  const lab = new Int32Array(GW * GH);
+  const comps = [];
+  for (let start = 0; start < GW * GH; start++) {
+    if (!G[start] || lab[start]) continue;
+    const id = comps.length + 1, stack = [start], cells = [];
+    lab[start] = id;
+    let minx = Infinity, maxx = -1, miny = Infinity, maxy = -1;
+    while (stack.length) {
+      const c = stack.pop(), cx = c % GW, cy = (c / GW) | 0;
+      cells.push(c);
+      if (cx < minx) minx = cx; if (cx > maxx) maxx = cx; if (cy < miny) miny = cy; if (cy > maxy) maxy = cy;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= GW || ny >= GH) continue;
+        const n = ny * GW + nx;
+        if (G[n] && !lab[n]) { lab[n] = id; stack.push(n); }
+      }
+    }
+    comps.push({ cells, minx, maxx, miny, maxy });
+  }
+  const BIN = 8; // Rasterzellen je Stützstelle
+  const nb = Math.ceil(GW / BIN);
+  let lines = comps.filter((c) => (c.maxx - c.minx) * s >= 0.15 * W && (c.maxy - c.miny) * s < 0.08 * H).map((c) => {
+    const ys = Array.from({ length: nb }, () => []);
+    for (const cell of c.cells) ys[Math.floor((cell % GW) / BIN)].push(((cell / GW) | 0) * s + s / 2);
+    const med = ys.map((a) => (a.length ? a.sort((p, q) => p - q)[a.length >> 1] : null));
+    const known = med.map((v, i) => [i, v]).filter(([, v]) => v !== null);
+    const yAt = med.map((v, i) => {
+      if (v !== null) return v;
+      const left = [...known].reverse().find(([k]) => k < i), right = known.find(([k]) => k > i);
+      if (left && right) return left[1] + ((right[1] - left[1]) * (i - left[0])) / (right[0] - left[0]);
+      return (left || right)[1];
+    });
+    return { yAt, mean: yAt.reduce((a, b) => a + b, 0) / yAt.length, x0: c.minx * s, x1: (c.maxx + 1) * s };
+  }).sort((a, b) => a.mean - b.mean);
+  // Doppelt erfasste Linien zusammenfassen
+  lines = lines.filter((l, i) => i === 0 || Math.abs(l.mean - lines[i - 1].mean) > H * 0.006);
+  const lineY = (l, x) => l.yAt.at(Math.min(nb - 1, Math.max(0, Math.floor(x / (s * BIN)))));
+
+  // Linien entfernen (dort, wo kein Buchstabe die Linie senkrecht kreuzt) → sauberes Schwarz-Weiß-Bild
+  const off = Math.max(4, Math.round(W / 400));
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    let near = 0;
+    for (let d = -3; d <= 3 && !near; d++) { const yy = y + d; if (yy >= 0 && yy < H && M[yy * W + x]) near = 1; }
+    if (near) {
+      const up = y - off >= 0 && D[i - off * W], dn = y + off < H && D[i + off * W];
+      if (!(up && dn)) D[i] = 0;
+    }
+  }
+
+  // Spalten: Lücken in der senkrechten Projektion
+  const prof = new Float64Array(W);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) prof[x] += D[y * W + x];
+  const k = Math.max(15, Math.round(W / 85));
+  const sm = new Float64Array(W);
+  let acc = 0;
+  for (let x = 0; x < W; x++) { acc += prof[x]; if (x >= k) acc -= prof[x - k]; sm[x - (k >> 1) < 0 ? 0 : x - (k >> 1)] = acc / k; }
+  // Spaltengrenzen nur innerhalb der Tabelle suchen (Ränder außerhalb der Linien zählen nicht)
+  const xs0 = lines.map((l) => l.x0).sort((a, b) => a - b), xs1 = lines.map((l) => l.x1).sort((a, b) => a - b);
+  const tx0 = lines.length ? xs0[xs0.length >> 1] : 0, tx1 = lines.length ? xs1[xs1.length >> 1] : W;
+  const span = Math.max(1, tx1 - tx0);
+  const cands = [];
+  const win = Math.round(W * 0.02), reach = Math.round(span * 0.2);
+  for (let x = Math.round(tx0 + span * 0.08); x < tx1 - span * 0.08; x++) {
+    let isMin = true;
+    for (let d = -win; d <= win && isMin; d++) { const xx = x + d; if (xx >= 0 && xx < W && sm[xx] < sm[x]) isMin = false; }
+    if (!isMin) continue;
+    let pl = 0, pr = 0;
+    for (let xx = Math.max(0, x - reach); xx < x; xx++) pl = Math.max(pl, sm[xx]);
+    for (let xx = x + 1; xx < Math.min(W, x + reach); xx++) pr = Math.max(pr, sm[xx]);
+    const depth = sm[x] / Math.max(1e-6, Math.min(pl, pr));
+    if (depth < 0.35) cands.push({ x, depth });
+  }
+  const cuts = [];
+  for (const c of cands.sort((a, b) => a.depth - b.depth)) {
+    if (cuts.length < 3 && cuts.every((x) => Math.abs(x - c.x) > span * 0.12)) cuts.push(c.x);
+  }
+  cuts.sort((a, b) => a - b);
+  // Beleuchtung ausgleichen (Schatten auf der Seite): Helligkeit relativ zur Umgebung
+  const gn = new Uint8Array(N);
+  const Rf = R * 3;
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - Rf), y1 = Math.min(H, y + Rf + 1);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - Rf), x1 = Math.min(W, x + Rf + 1);
+      const mean = (I[y1 * IW + x1] - I[y0 * IW + x1] - I[y1 * IW + x0] + I[y0 * IW + x0]) / ((y1 - y0) * (x1 - x0));
+      gn[y * W + x] = Math.min(255, Math.round((g[y * W + x] * 235) / Math.max(40, mean)));
+    }
+  }
+  // Entzerren: jede gefundene Linie wird waagerecht gezogen (gleicht Schräglage und Wölbung aus)
+  let straight = null, targets = null;
+  if (lines.length >= 3) {
+    targets = lines.map((l) => l.mean);
+    const out = new Uint8ClampedArray(N * 4);
+    const nL = lines.length;
+    for (let x = 0; x < W; x++) {
+      const ys = lines.map((l) => lineY(l, x));
+      let k = 0;
+      for (let y = 0; y < H; y++) {
+        while (k < nL - 1 && y > targets[k + 1]) k++;
+        let sy;
+        if (y <= targets[0]) sy = y + (ys[0] - targets[0]);
+        else if (y >= targets[nL - 1]) sy = y + (ys[nL - 1] - targets[nL - 1]);
+        else {
+          const t = (y - targets[k]) / (targets[k + 1] - targets[k]);
+          sy = ys[k] + t * (ys[k + 1] - ys[k]);
+        }
+        const yi = Math.min(H - 1, Math.max(0, Math.round(sy)));
+        const v = gn[yi * W + x], o = (y * W + x) * 4;
+        out[o] = out[o + 1] = out[o + 2] = v; out[o + 3] = 255;
+      }
+    }
+    straight = document.createElement('canvas');
+    straight.width = W; straight.height = H;
+    straight.getContext('2d').putImageData(new ImageData(out, W, H), 0, 0);
+  }
+  return { straight, targets, lines, lineY, cuts, W, H };
+}
+
+// Bereich der eigentlichen Vokabeltabelle (Anteile 0–1): die längste Folge gleichmäßig verteilter Linien
+function tableRegion(tbl) {
+  const ls = tbl.lines;
+  if (ls.length < 4) return null;
+  const gaps = ls.slice(1).map((l, i) => l.mean - ls[i].mean).sort((a, b) => a - b);
+  const med = gaps[gaps.length >> 1];
+  let best = [0, 0], start = 0;
+  for (let i = 1; i <= ls.length; i++) {
+    if (i === ls.length || ls[i].mean - ls[i - 1].mean > med * 4.2) { // höhere Abstände = Bildzeilen, z. B. ein Eimer
+      if (i - 1 - start > best[1] - best[0]) best = [start, i - 1];
+      start = i;
+    }
+  }
+  const grp = ls.slice(best[0], best[1] + 1);
+  if (grp.length < 5) return null;
+  const y0 = Math.max(0, grp[0].mean - med * 0.6), y1 = Math.min(tbl.H, grp[grp.length - 1].mean + med * 0.6);
+  const x0 = Math.max(0, Math.min(...grp.map((l) => l.x0)) - tbl.W * 0.02), x1 = Math.min(tbl.W, Math.max(...grp.map((l) => l.x1)) + tbl.W * 0.02);
+  const reg = { x0: x0 / tbl.W, y0: y0 / tbl.H, w: (x1 - x0) / tbl.W, h: (y1 - y0) / tbl.H };
+  return reg.w * reg.h < 0.9 ? reg : null; // nur zuschneiden, wenn es wirklich kleiner wird
+}
+
+// Wörter der Texterkennung in Tabellenzeilen und -spalten einsortieren
+function tableRows(data, tbl) {
+  const words = [];
+  for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) for (const w of l.words || []) {
+    if (!w.text || !w.text.trim()) continue;
+    const t = w.text.trim();
+    const dots = /^(\.{2,}|…)$/.test(t); // „the … the“, „je … desto“
+    const hasLetter = /\p{L}/u.test(t), twoLetters = /\p{L}{2}/u.test(t);
+    const okConf = w.confidence >= 35 || (w.confidence >= 15 && /\p{L}{4}/u.test(t));
+    const keep = dots || (hasLetter && (twoLetters || w.confidence >= 80) && okConf);
+    if (!keep) continue; // Linienreste, Bildrauschen
+    words.push(w);
+  }
+  if (!words.length || tbl.lines.length < 3 || !tbl.cuts.length) return null;
+  const src = tbl.straight;
+  if (src) {
+    const SW = src.width, SH = src.height, pd = src.getContext('2d').getImageData(0, 0, SW, SH).data;
+    for (const w of words) {
+      let d = 0, n = 0;
+      const xa = Math.max(0, w.bbox.x0), xb = Math.min(SW, w.bbox.x1), ya = Math.max(0, w.bbox.y0), yb = Math.min(SH, w.bbox.y1);
+      for (let y = ya; y < yb; y++) for (let x = xa; x < xb; x++) { n++; if (pd[(y * SW + x) * 4] < 140) d++; }
+      w.ink = n ? d / n : 0;
+    }
+  }
+  const cells = new Map();
+  for (const w of words) {
+    const cx = (w.bbox.x0 + w.bbox.x1) / 2, cy = (w.bbox.y0 + w.bbox.y1) / 2;
+    const row = tbl.targets ? tbl.targets.filter((t) => t < cy).length : tbl.lines.filter((l) => tbl.lineY(l, cx) < cy).length;
+    const col = tbl.cuts.filter((c) => c < w.bbox.x0 + (w.bbox.x1 - w.bbox.x0) * 0.3).length;
+    const key = row * 10 + col;
+    if (!cells.has(key)) cells.set(key, []);
+    cells.get(key).push(w);
+  }
+  const cellText = (ws, asTokens) => {
+    if (!ws) return asTokens ? [] : '';
+    const h = ws.reduce((a, w) => a + (w.bbox.y1 - w.bbox.y0), 0) / ws.length;
+    const sorted = [...ws].sort((a, b) => a.bbox.y0 - b.bbox.y0);
+    const lines = [];
+    for (const w of sorted) {
+      const ln = lines.find((l) => Math.min(l.y1, w.bbox.y1) - Math.max(l.y0, w.bbox.y0) > 0.4 * Math.min(l.y1 - l.y0, w.bbox.y1 - w.bbox.y0));
+      if (ln) { ln.ws.push(w); ln.y0 = Math.min(ln.y0, w.bbox.y0); ln.y1 = Math.max(ln.y1, w.bbox.y1); }
+      else lines.push({ y0: w.bbox.y0, y1: w.bbox.y1, ws: [w] });
+    }
+    const ordered = lines.sort((a, b) => a.y0 - b.y0).flatMap((l) => l.ws.sort((a, b) => a.bbox.x0 - b.bbox.x0));
+    return asTokens ? ordered : ordered.map((w) => w.text).join(' ');
+  };
+  const nCols = tbl.cuts.length + 1;
+  const rowsRaw = [];
+  for (let r = 0; r <= tbl.lines.length; r++) {
+    const cols = [];
+    let lowConf = [];
+    for (let c = 0; c < nCols; c++) {
+      const ws = cells.get(r * 10 + c);
+      cols.push(c === 0 ? headword(cellText(ws, true)) : cellText(ws));
+      if (ws) lowConf.push(...ws.filter((w) => w.confidence < 80).map((w) => cleanSide(w.text).toLowerCase()).filter((t) => t.length >= 2));
+    }
+    if (cols.some((t) => t.trim())) rowsRaw.push({ cols, low: lowConf });
+  }
+  // Welche Spalte ist Deutsch? Die mit den kürzesten Einträgen (Beispielsätze sind lang).
+  let gCol = 1;
+  if (nCols >= 3) {
+    const avg = (c) => { const t = rowsRaw.map((r) => r.cols[c]).filter(Boolean); return t.reduce((a, x) => a + x.split(/\s+/).length, 0) / (t.length || 1); };
+    let best = Infinity;
+    for (let c = 1; c < nCols; c++) { const a = avg(c); if (a < best) { best = a; gCol = c; } }
+  }
+  return rowsRaw.map((r) => {
+    const fRaw = r.cols[0];
+    const mid = r.cols.filter((_, i) => i !== 0 && i !== gCol).join(' ');
+    const f = cleanSide(fRaw), gg = cleanSide(r.cols[gCol] || '');
+    return [f, gg, exampleFrom(mid, fRaw), { f: isUnsure(f, r.low), g: isUnsure(gg, r.low) }];
+  }).filter(([a, b]) => (a + b).replace(/[^\p{L}]/gu, '').length >= 2);
+}
+
+// Stichwort aus der ersten Spalte: Lautschrift dahinter abschneiden.
+// Erkennbar an Klammer/Strich/Apostroph am Anfang, Lautschrift-Zeichen – oder daran, dass das Wort
+// deutlich weniger „Tinte“ hat als das fett gedruckte Stichwort davor.
+function headword(tokens) {
+  if (tokens.length > 1) {
+    // Einzeilige Einträge strikt von links nach rechts (kleine Zeichen wie „…“ liegen sonst falsch)
+    const hs = tokens.map((w) => w.bbox.y1 - w.bbox.y0).sort((a, b) => a - b);
+    const top = Math.min(...tokens.map((w) => w.bbox.y0)), bottom = Math.max(...tokens.map((w) => w.bbox.y1));
+    if (bottom - top < hs[hs.length >> 1] * 1.8) tokens = [...tokens].sort((a, b) => a.bbox.x0 - b.bbox.x0);
+  }
+  const keep = [];
+  let maxInk = 0;
+  for (const w of tokens) {
+    const t = w.text;
+    const ipaStart = /^[[({|'‘‚`´ˈ]/.test(t) || /[ːˈəɪʊɒæʃʒθðŋɔʌɜ:]/.test(t) || /[\]|)]$/.test(t);
+    const isDots = /^(\.{2,}|…)$/.test(t);
+    const thin = !isDots && keep.length && typeof w.ink === 'number' && maxInk > 0 && w.ink < maxInk * 0.62;
+    if (keep.length && (ipaStart || thin)) break;
+    if (!keep.length && /^\d+$/.test(t)) continue; // Zeilennummer am Rand
+    keep.push(t);
+    if (typeof w.ink === 'number' && !isDots) maxInk = Math.max(maxInk, w.ink);
+  }
+  return stripIpa(keep.join(' '));
+}
+
+// Lautschrift hinter dem Wort abschneiden: „to catch, caught [kætʃ; kɔ:t]“ → „to catch, caught“
+function stripIpa(t) {
+  let s = (t || '').replace(/^\s*\d+\s+/, '');
+  const cut = s.search(/[[|{\]]/);
+  if (cut > 0) s = s.slice(0, cut);
+  return s.split(/\s+/).filter((w) => !/^['ˈ`´]/.test(w) && !/[ːˈ]/.test(w)).join(' ');
+}
+
 // Wörter, bei denen die Texterkennung unsicher war (Konfidenz < 80 %)
 function lowWords(l) {
   return (l.words || []).filter((w) => typeof w.confidence === 'number' && w.confidence < 80)
@@ -972,11 +1270,56 @@ views.scan = async () => {
   };
   try {
     const pageBlob = await compressPhoto(file, crop).catch(() => null);
-    const canvas = await prepareImage(file, crop);
+    const fullCanvas = await prepareImage(file, crop);
+    let canvas = fullCanvas;
+    // Seiten mit Tabellenlinien: Linien finden, Tabelle automatisch zuschneiden und in voller Auflösung lesen
+    let tbl = null;
+    try {
+      tbl = analyzeTable(canvas);
+      const reg = tbl && tableRegion(tbl);
+      if (reg) {
+        const c0 = crop || { x: 0, y: 0, w: 1, h: 1 };
+        const crop2 = { x: c0.x + reg.x0 * c0.w, y: c0.y + reg.y0 * c0.h, w: reg.w * c0.w, h: reg.h * c0.h };
+        const zoomed = await prepareImage(file, crop2);
+        const t2 = analyzeTable(zoomed);
+        if (t2 && t2.lines.length >= 3 && t2.cuts.length >= 1) { canvas = zoomed; tbl = t2; }
+      }
+    } catch (e) { console.warn(e); }
+    const useTable = !!(tbl && tbl.lines.length >= 3 && tbl.cuts.length >= 1);
     const worker = await getWorker([LANGS[ch.lang].ocr, 'deu']);
-    const { data } = await worker.recognize(canvas, {}, { text: true, blocks: true });
+    let rows = null;
+    if (useTable) {
+      // Jede Spalte einzeln lesen (einfacheres Layout für die Texterkennung), Wörter danach per Linien zuordnen
+      const words = [];
+      const edges = [0, ...tbl.cuts, canvas.width];
+      await worker.setParameters({ tessedit_pageseg_mode: '4' });
+      try {
+        for (let c = 0; c < edges.length - 1; c++) {
+          const x0 = Math.max(0, edges[c] - 12), x1 = Math.min(canvas.width, edges[c + 1] + 12);
+          const strip = document.createElement('canvas');
+          strip.width = x1 - x0; strip.height = canvas.height;
+          strip.getContext('2d').drawImage(tbl.straight || canvas, x0, 0, strip.width, strip.height, 0, 0, strip.width, strip.height);
+          const s0 = $('#pstatus');
+          if (s0) s0.textContent = `Spalte ${c + 1} von ${edges.length - 1} wird gelesen …`;
+          const { data } = await worker.recognize(strip, {}, { blocks: true });
+          if (cancelled) return;
+          for (const b of data.blocks || []) for (const pg of b.paragraphs || []) for (const ln of pg.lines || []) for (const w of ln.words || []) {
+            words.push({ ...w, bbox: { x0: w.bbox.x0 + x0, x1: w.bbox.x1 + x0, y0: w.bbox.y0, y1: w.bbox.y1 } });
+          }
+        }
+      } finally {
+        await worker.setParameters({ tessedit_pageseg_mode: '6' }); // Standard von tesseract.js
+      }
+      rows = tableRows({ blocks: [{ paragraphs: [{ lines: [{ words }] }] }] }, tbl);
+    }
+    // Zum Vergleich immer auch klassisch lesen; genommen wird das Ergebnis mit mehr vollständigen Vokabeln
+    const complete = (rs) => (rs || []).filter((r) => r[0] && r[1] && !looksLikeJunk(r[0], r[1])).length;
+    const s1 = $('#pstatus');
+    if (s1 && useTable) s1.textContent = 'Gegenprobe …';
+    const { data } = await worker.recognize(fullCanvas, {}, { text: true, blocks: true });
     if (cancelled) return;
-    const rows = buildRows(linesFromResult(data).filter((l) => l.text || l.conf > 35));
+    const plainRows = buildRows(linesFromResult(data).filter((l) => l.text || l.conf > 35));
+    if (!rows || complete(plainRows) > complete(rows)) rows = plainRows;
     URL.revokeObjectURL(preview);
     if (!rows.length) {
       toast('Keine Wörter gefunden – probier es mit mehr Licht nochmal');
@@ -1563,7 +1906,7 @@ views.me = () => {
       <p>Hast du einen Testtermin eingetragen, plant die App so, dass jedes Wort vor dem Test oft genug drankommt – spätestens am Tag davor nochmal alle.</p>
       <p style="margin:0">Am besten jeden Tag 10 Minuten – dann bleiben die Wörter für immer im Kopf. 🧠</p>
     </div>
-    <p class="muted tiny center" style="margin-top:24px">Texterkennung: Tesseract (Apache-2.0) · Schrift: Nunito (OFL) · alles läuft offline auf dem Gerät</p>`;
+    <p class="muted tiny center" style="margin-top:24px">Version ${APP_VERSION}${IS_TEST ? ' (Test)' : ''} · Texterkennung: Tesseract (Apache-2.0) · Schrift: Nunito (OFL) · alles läuft offline auf dem Gerät</p>`;
   $('#back').onclick = () => go('home');
   $('#editprof').onclick = editProfile;
   $$('[data-set]').forEach((segEl) => $$('button', segEl).forEach((b) => (b.onclick = () => {
