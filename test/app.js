@@ -30,9 +30,11 @@ function emptyDb() {
     chapters: [],
     cards: [],
     days: {},
-    settings: { direction: 'auto', mode: 'type', sessionSize: 20, sound: true, autoSpeak: false },
+    settings: { direction: 'auto', mode: 'type', sessionSize: 20, sound: true, autoSpeak: false, dailyGoal: 20 },
     parent: { pin: '', recipients: [] },
     lastBackup: 0,
+    badges: {},
+    stats: { scans: 0, perfect: 0 },
   };
 }
 let db = load();
@@ -42,6 +44,8 @@ function migrate(d) {
   out.profile = Object.assign(emptyDb().profile, d.profile || {});
   out.settings = Object.assign(emptyDb().settings, d.settings || {});
   out.parent = Object.assign(emptyDb().parent, d.parent || {});
+  out.stats = Object.assign(emptyDb().stats, d.stats || {});
+  out.badges = d.badges || {};
   out.chapters.forEach((c) => { if (c.testDate === undefined) c.testDate = ''; if (c.archived === undefined) c.archived = false; });
   if ((d.version || 1) < 3 && out.settings.direction === 'mixed') out.settings.direction = 'auto';
   out.version = 3;
@@ -469,13 +473,14 @@ views.home = () => {
   app.innerHTML = `
     <div class="hello">
       <div class="avatar">${esc(db.profile.avatar)}</div>
-      <div class="grow"><h1>${greeting()}, ${esc(db.profile.name)}!</h1>${s ? `<div class="muted small">🔥 ${plural(s, 'Tag', 'Tage')} in Folge gelernt</div>` : '<div class="muted small">Schön, dass du da bist!</div>'}</div>
+      <div class="grow"><h1>${greeting()}, ${esc(db.profile.name)}!</h1><div class="muted small">⭐ Level ${levelInfo().level}${s ? ` · 🔥 ${plural(s, 'Tag', 'Tage')} in Folge` : ''}</div></div>
       <button class="iconbtn" id="me" aria-label="Mein Bereich">⚙️</button>
     </div>
     ${db.cards.length ? `
     <div class="hero ${due.length ? '' : 'done'}">
       ${due.length ? `<div class="num">${due.length}</div><div class="lbl">${due.length === 1 ? 'Vokabel wartet' : 'Vokabeln warten'} heute auf dich</div>`
         : `<div class="num">🎉</div><div class="lbl">Alles geschafft für heute!</div>`}
+      ${goalRing()}
       <div class="chips">
         ${today.right + today.wrong ? `<span class="chip">Heute: ${today.right} ✓ · ${today.wrong} ✗</span><span class="chip">⏱️ ${fmtMin(today.secs)}</span>` : ''}
         ${problems.length ? `<span class="chip">⚠️ ${problems.length} schwierige</span>` : ''}
@@ -653,7 +658,7 @@ views.chapter = () => {
     $('#ex-cloze').onclick = () => startExam(ch, 'cloze');
   }
   $('#scan').onclick = () => $('#file').click();
-  $('#file').onchange = (e) => { const f = e.target.files[0]; if (f) go('scan', { id: ch.id, file: f }); };
+  $('#file').onchange = (e) => { const f = e.target.files[0]; if (f) go('crop', { id: ch.id, file: f }); };
   $('#add').onclick = () => editCard(ch);
   $('#paste').onclick = () => go('paste', { id: ch.id });
   $$('[data-card]').forEach((el) => (el.onclick = (e) => {
@@ -757,17 +762,24 @@ async function getWorker(langs) {
   return ocrWorker;
 }
 
-async function prepareImage(file) {
+// Ausschnitt (Anteile 0–1) in Pixel umrechnen; ohne Ausschnitt = ganzes Bild
+function cropRect(img, crop) {
+  const W = img.naturalWidth, H = img.naturalHeight;
+  if (!crop) return { sx: 0, sy: 0, sw: W, sh: H };
+  return { sx: Math.round(crop.x * W), sy: Math.round(crop.y * H), sw: Math.max(1, Math.round(crop.w * W)), sh: Math.max(1, Math.round(crop.h * H)) };
+}
+async function prepareImage(file, crop) {
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const { sx, sy, sw, sh } = cropRect(img, crop);
     const max = 2200;
-    const scale = Math.min(2, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const scale = Math.min(2, max / Math.max(sw, sh));
     const c = document.createElement('canvas');
-    c.width = Math.round(img.naturalWidth * scale);
-    c.height = Math.round(img.naturalHeight * scale);
+    c.width = Math.round(sw * scale);
+    c.height = Math.round(sh * scale);
     const ctx = c.getContext('2d');
-    ctx.drawImage(img, 0, 0, c.width, c.height);
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
     const d = ctx.getImageData(0, 0, c.width, c.height);
     const p = d.data;
     for (let i = 0; i < p.length; i += 4) {
@@ -824,6 +836,25 @@ function splitOcrLine(line) {
 // Erkannte Zeilen in Vokabel-Zeilen umwandeln. Bricht ein Eintrag im Buch in die
 // nächste Zeile um (z. B. „der Nachbar, die / Nachbarin“), wird der Rest an die
 // passende Spalte der Zeile davor angehängt.
+// Buchstaben, die es in der Sprache nicht gibt (z. B. „môgen“ im Deutschen) → wahrscheinlich Lesefehler
+const LETTERS = { de: 'a-zäöüß', en: 'a-z', fr: 'a-zàâæçéèêëîïôœùûüÿ' };
+function oddLetters(text, lang) {
+  if (!text) return false;
+  const allowed = new RegExp(`^[${LETTERS[lang] || 'a-z'}]$`);
+  return [...text.toLowerCase()].some((ch) => /\p{L}/u.test(ch) && !allowed.test(ch));
+}
+
+// Wörter, bei denen die Texterkennung unsicher war (Konfidenz < 80 %)
+function lowWords(l) {
+  return (l.words || []).filter((w) => typeof w.confidence === 'number' && w.confidence < 80)
+    .map((w) => cleanSide(w.text).toLowerCase()).filter((t) => t.length >= 2);
+}
+function isUnsure(text, low) {
+  if (!text) return false;
+  const t = text.toLowerCase();
+  return /[0-9|@#{}<>~^\\]/.test(text) || (low || []).some((w) => t.includes(w));
+}
+
 function buildRows(lines) {
   const out = [];
   for (const l of lines) {
@@ -838,13 +869,17 @@ function buildRows(lines) {
         if (best === prev.colX.length - 1) prev.g = `${prev.g} ${c.text}`;
         else if (best > 0) prev.mid = `${prev.mid} ${c.text}`.trim();
       }
+      prev.low.push(...lowWords(l));
       continue;
     }
     const [f, g, mid] = splitOcrLine(l);
-    out.push({ f, g, mid: mid || '', colX: cols && cols.length >= 2 ? cols.map((c) => c.x) : null });
+    out.push({ f, g, mid: mid || '', colX: cols && cols.length >= 2 ? cols.map((c) => c.x) : null, low: lowWords(l) });
   }
   return out
-    .map((r) => [cleanSide(r.f), cleanSide(r.g), exampleFrom(r.mid, r.f)])
+    .map((r) => {
+      const f = cleanSide(r.f), g = cleanSide(r.g);
+      return [f, g, exampleFrom(r.mid, r.f), { f: isUnsure(f, r.low), g: isUnsure(g, r.low) }];
+    })
     .filter(([a, b]) => (a + b).replace(/[^\p{L}]/gu, '').length >= 2);
 }
 
@@ -857,10 +892,59 @@ function looksLikeJunk(f, g) {
   return false;
 }
 
-views.scan = async () => {
+/* ---------- Foto zuschneiden ---------- */
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+views.crop = () => {
   const ch = chapter(state.id);
   if (!ch) return go('home');
   const { file, prevRows, prevPages } = state;
+  const url = URL.createObjectURL(file);
+  let rc = { x: 0.04, y: 0.04, w: 0.92, h: 0.92 };
+  app.innerHTML = `
+    <div class="topbar"><button class="iconbtn" id="back">‹</button><h1>Bereich wählen</h1></div>
+    <p class="small muted">Zieh die Ecken so, dass <strong>nur die Vokabeln</strong> im Rahmen sind. Überschriften und Ränder weglassen.</p>
+    <div class="cropbox" id="cropbox"><img src="${url}" alt="Dein Foto" draggable="false">
+      <div class="cropsel" id="sel"><span class="h tl" data-h="tl"></span><span class="h tr" data-h="tr"></span><span class="h bl" data-h="bl"></span><span class="h br" data-h="br"></span></div></div>
+    <div class="grid2" style="margin-top:16px"><button class="btn" id="whole">Ganzes Foto</button><button class="btn primary" id="usecrop">Ausschnitt lesen ›</button></div>`;
+  const box = $('#cropbox'), sel = $('#sel');
+  const draw = () => { sel.style.left = rc.x * 100 + '%'; sel.style.top = rc.y * 100 + '%'; sel.style.width = rc.w * 100 + '%'; sel.style.height = rc.h * 100 + '%'; };
+  draw();
+  let drag = null;
+  box.addEventListener('pointerdown', (e) => {
+    const h = e.target.dataset.h || (e.target === sel ? 'move' : null);
+    if (!h) return;
+    e.preventDefault();
+    const b = box.getBoundingClientRect();
+    drag = { h, sx: e.clientX, sy: e.clientY, o: { ...rc }, bw: b.width, bh: b.height };
+    box.setPointerCapture(e.pointerId);
+  });
+  box.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const dx = (e.clientX - drag.sx) / drag.bw, dy = (e.clientY - drag.sy) / drag.bh, o = drag.o, min = 0.08;
+    let { x, y, w, h } = o;
+    if (drag.h === 'move') { x = clamp(o.x + dx, 0, 1 - o.w); y = clamp(o.y + dy, 0, 1 - o.h); }
+    else {
+      if (drag.h.includes('l')) { x = clamp(o.x + dx, 0, o.x + o.w - min); w = o.w + (o.x - x); }
+      if (drag.h.includes('r')) { w = clamp(o.w + dx, min, 1 - o.x); }
+      if (drag.h.includes('t')) { y = clamp(o.y + dy, 0, o.y + o.h - min); h = o.h + (o.y - y); }
+      if (drag.h.includes('b')) { h = clamp(o.h + dy, min, 1 - o.y); }
+    }
+    rc = { x, y, w, h };
+    draw();
+  });
+  const end = () => { drag = null; };
+  box.addEventListener('pointerup', end);
+  box.addEventListener('pointercancel', end);
+  const leave = (to) => { URL.revokeObjectURL(url); to(); };
+  $('#back').onclick = () => leave(() => (prevRows ? go('review', { id: ch.id, rows: prevRows, pages: prevPages }) : go('chapter', { id: ch.id })));
+  $('#whole').onclick = () => leave(() => go('scan', { id: ch.id, file, prevRows, prevPages, crop: null }));
+  $('#usecrop').onclick = () => leave(() => go('scan', { id: ch.id, file, prevRows, prevPages, crop: rc }));
+};
+
+views.scan = async () => {
+  const ch = chapter(state.id);
+  if (!ch) return go('home');
+  const { file, prevRows, prevPages, crop } = state;
   const preview = URL.createObjectURL(file);
   app.innerHTML = `
     <div class="topbar"><button class="iconbtn" id="back">‹</button><h1>Foto wird gelesen …</h1></div>
@@ -887,8 +971,8 @@ views.scan = async () => {
     if (b && typeof m.progress === 'number') b.style.width = (m.status === 'recognizing text' ? 30 + m.progress * 70 : m.progress * 30) + '%';
   };
   try {
-    const pageBlob = await compressPhoto(file).catch(() => null);
-    const canvas = await prepareImage(file);
+    const pageBlob = await compressPhoto(file, crop).catch(() => null);
+    const canvas = await prepareImage(file, crop);
     const worker = await getWorker([LANGS[ch.lang].ocr, 'deu']);
     const { data } = await worker.recognize(canvas, {}, { text: true, blocks: true });
     if (cancelled) return;
@@ -914,7 +998,7 @@ views.review = () => {
   const ch = chapter(state.id);
   if (!ch) return go('home');
   const L = LANGS[ch.lang];
-  const rows = state.rows.map((r) => (Array.isArray(r) ? { f: r[0], g: r[1], ex: r[2] || '', on: !looksLikeJunk(r[0], r[1]) } : r));
+  const rows = state.rows.map((r) => (Array.isArray(r) ? { f: r[0], g: r[1], ex: r[2] || '', on: !looksLikeJunk(r[0], r[1]), uf: !!(r[3] && r[3].f) || oddLetters(r[0], ch.lang), ug: !!(r[3] && r[3].g) || oddLetters(r[1], 'de') } : r));
   const pages = state.pages || [];
   const pageUrls = pages.map((b) => URL.createObjectURL(b));
   const count = () => rows.filter((r) => r.on && r.f.trim() && r.g.trim()).length;
@@ -922,14 +1006,14 @@ views.review = () => {
   const draw = () => {
     app.innerHTML = `
       <div class="topbar"><button class="iconbtn" id="back">‹</button><h1>Stimmt alles?</h1></div>
-      <div class="banner yellow" style="margin-top:0;margin-bottom:14px"><span class="ico">🧐</span><div class="small">Vergleiche mit deinem Foto und verbessere Fehler (z. B. fehlende ä, ö, ü). Nur Zeilen mit Haken werden gespeichert.</div></div>
+      <div class="banner yellow" style="margin-top:0;margin-bottom:14px"><span class="ico">🧐</span><div class="small">Vergleiche mit deinem Foto und verbessere Fehler (z. B. fehlende ä, ö, ü). <strong>Gelbe Felder</strong> genau ansehen – dort war die Erkennung unsicher. Nur Zeilen mit Haken werden gespeichert.</div></div>
       ${pageUrls.length ? `<div class="pagestrip">${pageUrls.map((u, i) => `<img src="${u}" alt="Foto ${i + 1}" data-big="${i}">`).join('')}<span class="muted tiny">Foto antippen = groß. Es wird nach dem Speichern gelöscht.</span></div>` : ''}
       <div class="row tiny muted" style="margin:0 4px 8px 46px;font-weight:800"><span class="grow">oben: ${L.flag} ${L.name} · unten: 🇩🇪 Deutsch</span></div>
       <div id="rows">${rows.map((r, i) => `<div class="revrow ${r.on ? '' : 'off'}" data-i="${i}">
           <input type="checkbox" ${r.on ? 'checked' : ''} aria-label="Übernehmen">
           <div class="inputs">
-            <input type="text" data-k="f" value="${esc(r.f)}" placeholder="${L.flag} ${L.name}" autocapitalize="off" autocorrect="off" spellcheck="false">
-            <input type="text" data-k="g" value="${esc(r.g)}" placeholder="🇩🇪 Deutsch" autocapitalize="off" autocorrect="off" spellcheck="false">
+            <input type="text" data-k="f" class="${r.on && r.uf ? 'unsure' : ''}" value="${esc(r.f)}" placeholder="${L.flag} ${L.name}" autocapitalize="off" autocorrect="off" spellcheck="false">
+            <input type="text" data-k="g" class="${r.on && r.ug ? 'unsure' : ''}" value="${esc(r.g)}" placeholder="🇩🇪 Deutsch" autocapitalize="off" autocorrect="off" spellcheck="false">
             ${r.ex ? `<div class="tiny muted">📝 Beispielsatz: ${esc(r.ex)} <button type="button" class="linkbtn" data-noex>entfernen</button></div>` : ''}
           </div>
           <button class="del" data-del aria-label="Zeile entfernen">✕</button>
@@ -945,7 +1029,7 @@ views.review = () => {
     $('#swap').onclick = () => { rows.forEach((r) => ([r.f, r.g] = [r.g, r.f])); draw(); };
     $('#addrow').onclick = () => { rows.push({ f: '', g: '', on: true }); draw(); $$('.revrow').pop().querySelector('input[type=text]').focus(); };
     $('#more').onclick = () => $('#file').click();
-    $('#file').onchange = (e) => { const f = e.target.files[0]; if (f) go('scan', { id: ch.id, file: f, prevRows: asArrays(), prevPages: pages }); };
+    $('#file').onchange = (e) => { const f = e.target.files[0]; if (f) go('crop', { id: ch.id, file: f, prevRows: asArrays(), prevPages: pages }); };
     $$('[data-big]').forEach((im) => (im.onclick = () => showImage(pageUrls[+im.dataset.big])));
     $$('.revrow').forEach((el) => {
       const r = rows[+el.dataset.i];
@@ -953,6 +1037,8 @@ views.review = () => {
       cb.onchange = () => { r.on = cb.checked; el.classList.toggle('off', !r.on); upd(); };
       el.querySelectorAll('input[type=text]').forEach((inp) => (inp.oninput = () => {
         r[inp.dataset.k] = inp.value;
+        r['u' + inp.dataset.k] = false;
+        inp.classList.remove('unsure');
         if (r.f.trim() && r.g.trim() && !r.on) { r.on = true; el.classList.remove('off'); cb.checked = true; }
         upd();
       }));
@@ -977,7 +1063,9 @@ views.review = () => {
       save();
       // Fotos werden nicht gespeichert – sie dienten nur zum Erfassen und Prüfen
       pageUrls.forEach((u) => URL.revokeObjectURL(u));
-      toast(`🎉 ${plural(added, 'Vokabel', 'Vokabeln')} gespeichert${dup ? ` (${dup} doppelt)` : ''}`);
+      if (pages.length) { db.stats.scans += pages.length; save(); }
+      const fresh = checkBadges();
+      toast(fresh.length ? `🏅 Neues Abzeichen: ${fresh.map((b) => b.name).join(', ')}` : `🎉 ${plural(added, 'Vokabel', 'Vokabeln')} gespeichert${dup ? ` (${dup} doppelt)` : ''}`);
       go('chapter', { id: ch.id });
     };
   };
@@ -1055,12 +1143,14 @@ views.learn = () => {
     <div class="topbar"><button class="iconbtn" id="quit" aria-label="Beenden">✕</button><div class="progress"><div style="width:${pct}%"></div></div><span class="small" style="font-weight:900">${session.done}/${session.total}</span></div>
     ${session.streakNow >= 3 ? `<div class="center small" style="font-weight:900;color:var(--primary-dark);margin-bottom:6px">🔥 ${session.streakNow} richtig hintereinander!</div>` : ''}
     <div class="card quiz" id="qcard">
+      <button type="button" class="editbtn" id="editcard" aria-label="Vokabel korrigieren">✏️</button>
       <span class="dir ${ch.lang}">${dir === 'f2g' ? `${L.flag} ${L.name} → 🇩🇪 Deutsch` : `🇩🇪 Deutsch → ${L.flag} ${L.name}`}</span>
       <div class="tiny muted" style="margin-top:6px">${dir === 'f2g' ? '📖 Was bedeutet das?' : '✍️ Schreib es selbst – achte auf die Rechtschreibung'}${session.wrongIds.has(card.id) ? ' · Nochmal probieren 💪' : ''}</div>
       <div class="word">${esc(question)}</div>
       ${dir === 'f2g' ? `${speakBtn('id="say"')}<div class="muted tiny" style="margin-top:4px">2× tippen = langsam</div>` : ''}
       <div id="area"></div>
     </div>`;
+  $('#editcard').onclick = () => editCard(ch, card);
   $('#quit').onclick = async () => {
     if (session.done > 0 && !(await confirmDlg('Aufhören?', 'Was du schon gelernt hast, ist gespeichert.', 'Aufhören'))) return;
     const b = session.back;
@@ -1099,6 +1189,7 @@ views.learn = () => {
     // Beim Schreiben in der Fremdsprache zählt die Rechtschreibung (wie im Test).
     const strict = dir === 'g2f';
     const correct = kind === 'right' || (!strict && kind !== 'wrong');
+    const needRetype = !correct && strict;
     sound(correct);
     if (!correct) $('#qcard').classList.add('shake');
     const msg = {
@@ -1115,15 +1206,30 @@ views.learn = () => {
         <div class="row" style="margin-top:10px;color:var(--text)">${speakBtn('id="say2"', true)}<span class="small">${dir === 'f2g' || kind === 'right' ? `<strong>${esc(card.foreign)}</strong><br>` : ''}<span class="muted tiny">Anhören & nachsprechen · 2× tippen = langsam</span></span></div>
         ${(kind === 'wrong' || (strict && kind !== 'right')) && given ? `<div class="small muted" style="margin-top:4px">Du hast geschrieben: ${esc(given)}</div>` : ''}
       </div>
+      ${needRetype ? `<div class="retype"><label class="field" for="retype">✍️ Schreib es einmal richtig ab – so merkst du es dir besser:</label>
+        <input type="text" id="retype" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
+        ${ch.lang === 'fr' ? `<div class="accents">${FR_ACCENTS.map((a) => `<button type="button" data-a="${a}">${a}</button>`).join('')}</div>` : ''}</div>` : ''}
       <div class="stack" style="margin-top:16px">
-        <button class="btn ${correct ? 'ok' : 'primary'} big block" id="next">Weiter ›</button>
+        <button class="btn ${correct ? 'ok' : 'primary'} big block" id="next" ${needRetype ? 'disabled' : ''}>Weiter ›</button>
+        ${needRetype ? `<button class="btn ghost block" id="skipretype">Überspringen</button>` : ''}
         ${kind === 'wrong' && given ? `<button class="btn ghost block" id="override">Ich hatte doch recht</button>` : ''}
         ${kind === 'typo' && !strict ? `<button class="btn ghost block" id="override-bad">Zählt als falsch</button>` : ''}
       </div>`;
     if (dir === 'g2f' || kind !== 'right') speak(card.foreign, ch.lang);
     $('#say2').onclick = () => speak(card.foreign, ch.lang);
     const next = $('#next');
-    next.focus();
+    if (needRetype) {
+      const rt = $('#retype');
+      bindAccents(area, rt);
+      setTimeout(() => rt.focus(), 60);
+      rt.oninput = () => {
+        const ok = check(rt.value, answer) === 'right';
+        next.disabled = !ok;
+        rt.classList.toggle('good', ok);
+      };
+      rt.onkeydown = (e) => { if (e.key === 'Enter' && !next.disabled) next.click(); };
+      $('#skipretype').onclick = () => finish(correct);
+    } else next.focus();
     next.onclick = () => finish(correct);
     const ov = $('#override');
     if (ov) ov.onclick = () => finish(true);
@@ -1143,12 +1249,7 @@ views.learn = () => {
       </form>`;
     const inp = $('#answer');
     setTimeout(() => inp.focus(), 60);
-    $$('.accents button').forEach((b) => (b.onclick = () => {
-      const s = inp.selectionStart ?? inp.value.length, e = inp.selectionEnd ?? s;
-      inp.value = inp.value.slice(0, s) + b.dataset.a + inp.value.slice(e);
-      inp.focus();
-      inp.setSelectionRange(s + 1, s + 1);
-    }));
+    bindAccents(area, inp);
     $('#aform').onsubmit = (e) => {
       e.preventDefault();
       if (!inp.value.trim()) return inp.focus();
@@ -1195,6 +1296,79 @@ function introCard(card, ch) {
   };
 }
 
+/* ---------- Tagesziel, Level, Abzeichen ---------- */
+function goalRing() {
+  const goal = db.settings.dailyGoal || 20;
+  const t = db.days[dayKey()] || { right: 0, wrong: 0 };
+  const done = t.right + t.wrong, p = Math.min(done / goal, 1), C = 163.4;
+  return `<div class="goal"><svg viewBox="0 0 64 64" width="60" height="60" aria-hidden="true"><circle cx="32" cy="32" r="26" fill="none" stroke="rgba(255,255,255,.3)" stroke-width="8"/>
+    <circle cx="32" cy="32" r="26" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-dasharray="${(p * C).toFixed(1)} ${C}" transform="rotate(-90 32 32)"/>
+    <text x="32" y="37" text-anchor="middle" font-size="16" font-weight="900" fill="#fff">${p >= 1 ? '✓' : done}</text></svg>
+    <div><strong>${p >= 1 ? 'Tagesziel geschafft! ✅' : '🎯 Tagesziel'}</strong><div class="small">${Math.min(done, goal)} von ${goal} Wörtern heute</div></div></div>`;
+}
+function levelInfo() {
+  const xp = db.cards.reduce((n, c) => n + (c.right || 0), 0);
+  const level = 1 + Math.floor(Math.sqrt(xp / 10));
+  const next = 10 * level * level;
+  return { xp, level, toNext: next - xp, pct: Math.round(((xp - 10 * (level - 1) ** 2) / (next - 10 * (level - 1) ** 2)) * 100) };
+}
+function bestStreak() {
+  const ks = Object.keys(db.days).filter((k) => db.days[k].right + db.days[k].wrong > 0).sort();
+  let best = 0, run = 0, prev = null;
+  for (const k of ks) {
+    const t = keyToTime(k);
+    run = prev !== null && Math.round((t - prev) / DAY) === 1 ? run + 1 : 1;
+    best = Math.max(best, run);
+    prev = t;
+  }
+  return best;
+}
+const BADGES = [
+  { id: 'first', icon: '🌱', name: 'Erster Schritt', hint: 'Die erste Vokabel richtig', test: (s) => s.xp >= 1 },
+  { id: 'scan1', icon: '📷', name: 'Fotograf', hint: 'Die erste Buchseite fotografiert', test: (s) => s.scans >= 1 },
+  { id: 'goal1', icon: '🎯', name: 'Ziel erreicht', hint: 'Das Tagesziel einmal geschafft', test: (s) => s.goalDays >= 1 },
+  { id: 'goal10', icon: '🏹', name: 'Zielsicher', hint: 'Das Tagesziel 10-mal geschafft', test: (s) => s.goalDays >= 10 },
+  { id: 'streak3', icon: '🔥', name: 'Dranbleiber', hint: '3 Tage in Folge gelernt', test: (s) => s.streak >= 3 },
+  { id: 'streak7', icon: '🚀', name: 'Wochenheld', hint: '7 Tage in Folge gelernt', test: (s) => s.streak >= 7 },
+  { id: 'streak30', icon: '🏆', name: 'Monatsmeister', hint: '30 Tage in Folge gelernt', test: (s) => s.streak >= 30 },
+  { id: 'words50', icon: '📚', name: 'Sammler', hint: '50 Vokabeln angelegt', test: (s) => s.cards >= 50 },
+  { id: 'words200', icon: '🐛', name: 'Bücherwurm', hint: '200 Vokabeln angelegt', test: (s) => s.cards >= 200 },
+  { id: 'sure25', icon: '🧠', name: 'Merkprofi', hint: '25 Wörter sitzen sicher', test: (s) => s.sure >= 25 },
+  { id: 'sure100', icon: '💎', name: 'Gedächtnis-Ass', hint: '100 Wörter sitzen sicher', test: (s) => s.sure >= 100 },
+  { id: 'perfect', icon: '💯', name: 'Fehlerfrei', hint: 'Eine Runde mit mind. 10 Wörtern ohne Fehler', test: (s) => s.perfect >= 1 },
+  { id: 'exam1', icon: '🎓', name: 'Prüfungsstar', hint: 'Eine Prüfung mit Note 1', test: (s) => s.examOne },
+];
+function checkBadges() {
+  const goal = db.settings.dailyGoal || 20;
+  const st = {
+    xp: levelInfo().xp,
+    scans: db.stats.scans || 0,
+    perfect: db.stats.perfect || 0,
+    goalDays: Object.values(db.days).filter((d) => d.right + d.wrong >= goal).length,
+    streak: bestStreak(),
+    cards: db.cards.length,
+    sure: db.cards.filter((c) => c.box >= 4).length,
+    examOne: db.chapters.some((c) => (c.exams || []).some((e) => gradeFor(e.score / e.total) === 1)),
+  };
+  const fresh = BADGES.filter((b) => !db.badges[b.id] && b.test(st));
+  fresh.forEach((b) => { db.badges[b.id] = dayKey(); });
+  if (fresh.length) save();
+  return fresh;
+}
+function badgeBanner(fresh) {
+  return fresh.length ? `<div class="banner yellow" style="margin-top:16px"><span class="ico">🏅</span><div class="grow"><strong>Neues Abzeichen!</strong>
+    <div class="small">${fresh.map((b) => `${b.icon} ${esc(b.name)}`).join(' · ')}</div></div></div>` : '';
+}
+function bindAccents(root, inp) {
+  $$('.accents button', root).forEach((b) => (b.onclick = () => {
+    const s0 = inp.selectionStart ?? inp.value.length, e0 = inp.selectionEnd ?? s0;
+    inp.value = inp.value.slice(0, s0) + b.dataset.a + inp.value.slice(e0);
+    inp.focus();
+    inp.setSelectionRange(s0 + 1, s0 + 1);
+    inp.dispatchEvent(new Event('input'));
+  }));
+}
+
 views.summary = () => {
   const s = session;
   if (!s) return go('home');
@@ -1204,6 +1378,8 @@ views.summary = () => {
   const moreDue = pickDue(s.back.view === 'chapter' ? cardsOf(s.back.id) : db.cards).length;
   const recips = db.parent.recipients;
   const k = dayKey();
+  if (pct === 100 && s.total >= 10 && !s.perfectCounted) { s.perfectCounted = true; db.stats.perfect++; save(); }
+  const fresh = s.freshBadges || (s.freshBadges = checkBadges());
   app.innerHTML = `
     <div class="hero ${pct >= 80 ? 'done' : ''} center">
       <div style="font-size:64px;position:relative;z-index:1">${emoji}</div>
@@ -1213,7 +1389,9 @@ views.summary = () => {
         <span class="chip">${s.firstTryRight} von ${s.total} auf Anhieb</span>
         ${s.bestStreak >= 3 ? `<span class="chip">🔥 ${s.bestStreak} in Folge</span>` : ''}
       </div>
+      <div style="text-align:left">${goalRing()}</div>
     </div>
+    ${badgeBanner(fresh)}
     ${wrongCards.length ? `<h2>Diese Wörter üben wir morgen nochmal</h2>
       <div class="list">${wrongCards.map((c) => `<div class="vocab"><i class="box-dot" style="background:var(--b1)"></i><div class="grow"><div class="f">${esc(c.foreign)}</div><div class="g">${esc(c.german)}</div></div></div>`).join('')}</div>` : ''}
     <div class="stack" style="margin-top:22px">
@@ -1221,7 +1399,7 @@ views.summary = () => {
       ${recips.map((r) => `<a class="btn wa block" href="${esc(waLink(r.number, buildReport(k)))}" target="_blank" rel="noopener" data-sent="${k}|${r.id}">📨 Bericht an ${esc(r.name)} senden</a>`).join('')}
       <button class="btn ${moreDue ? '' : 'primary big'} block" id="done">Fertig</button>
     </div>`;
-  if (pct >= 80) confetti();
+  if (pct >= 80 || fresh.length) confetti();
   $('#done').onclick = () => { const b = s.back; session = null; go(b.view, b); };
   const ag = $('#again');
   if (ag) ag.onclick = () => { const b = s.back; state = Object.assign({ view: b.view }, b); startSession(pickDue(b.view === 'chapter' ? cardsOf(b.id) : db.cards), s.title); };
@@ -1295,6 +1473,9 @@ function buildReport(k) {
     L.push('📅 Anstehende Tests:');
     tests.forEach(({ c, t }) => L.push(`• ${LANGS[c.lang].flag} ${c.name}: ${fmtDate(t.day)} (${daysLabel(t.daysLeft)}) – ${t.ready} % sicher`));
   }
+  const newBadges = BADGES.filter((b) => db.badges[b.id] === k);
+  if (newBadges.length) { L.push(''); L.push(`🏅 Neue Abzeichen: ${newBadges.map((b) => `${b.icon} ${b.name}`).join(', ')}`); }
+  if (total) { L.push(''); L.push(`🎯 Tagesziel: ${total >= (db.settings.dailyGoal || 20) ? 'geschafft ✅' : `${total} von ${db.settings.dailyGoal || 20} Wörtern`}`); }
   const s = streak();
   if (s > 1) { L.push(''); L.push(`🔥 ${s} Tage in Folge gelernt`); }
   return L.join('\n');
@@ -1338,6 +1519,12 @@ views.me = () => {
       <div class="row spread muted tiny" style="margin-top:6px"><span>vor 2 Wochen</span><span>heute</span></div>
     </div>
     ${problems.length ? `<h2>⚠️ Schwierige Wörter</h2><div class="list">${problems.map((c) => `<div class="vocab"><i class="box-dot" style="background:var(--b${c.box})"></i><div class="grow"><div class="f">${esc(c.foreign)}</div><div class="g">${esc(c.german)}</div></div><span class="muted small">${c.wrong}× ✗</span></div>`).join('')}</div>` : ''}
+    <h2>🏅 Level & Abzeichen</h2>
+    <div class="card">
+      <div class="row spread"><strong>⭐ Level ${levelInfo().level}</strong><span class="muted small">noch ${levelInfo().toNext} richtige bis Level ${levelInfo().level + 1}</span></div>
+      <div class="meter"><div style="width:${levelInfo().pct}%"></div></div>
+      <div class="badges">${BADGES.map((b) => `<div class="badge-item ${db.badges[b.id] ? 'got' : ''}" title="${esc(b.hint)}"><div class="bi">${b.icon}</div><div class="bn">${esc(b.name)}</div><div class="bh">${esc(b.hint)}</div></div>`).join('')}</div>
+    </div>
     <h2>⚙️ So möchte ich lernen</h2>
     <div class="card stack">
       <label class="field">Abfragen</label>${seg('direction', [['auto', '✨ Auto'], ['f2g', 'Fremd→DE'], ['g2f', 'DE→Fremd'], ['mixed', 'Mix']])}
@@ -1345,6 +1532,7 @@ views.me = () => {
       <label class="field">Antworten</label>${seg('mode', [['type', '⌨️ Eintippen'], ['reveal', '👀 Aufdecken']])}
       <p class="muted tiny" style="margin-top:6px">Eintippen lernt besser (auch die Rechtschreibung). Aufdecken geht schneller.</p>
       <label class="field">Wörter pro Runde</label>${seg('sessionSize', [[10, '10'], [20, '20'], [30, '30'], [50, '50']])}
+      <label class="field">Tagesziel (Wörter pro Tag)</label>${seg('dailyGoal', [[10, '10'], [20, '20'], [30, '30'], [50, '50']])}
       <label class="field">Töne</label>${seg('sound', [['true', '🔊 An'], ['false', '🔇 Aus']])}
       <label class="field">Fremdwort automatisch vorlesen</label>${seg('autoSpeak', [['true', '🗣️ Ja'], ['false', 'Nur per Knopf']])}
       <button type="button" class="btn teal-soft block" id="ttstest">🔊 Vorlesen testen</button>
@@ -1380,7 +1568,7 @@ views.me = () => {
   $('#editprof').onclick = editProfile;
   $$('[data-set]').forEach((segEl) => $$('button', segEl).forEach((b) => (b.onclick = () => {
     const key = segEl.dataset.set;
-    st[key] = key === 'sessionSize' ? +b.dataset.v : (key === 'sound' || key === 'autoSpeak') ? b.dataset.v === 'true' : b.dataset.v;
+    st[key] = key === 'sessionSize' || key === 'dailyGoal' ? +b.dataset.v : (key === 'sound' || key === 'autoSpeak') ? b.dataset.v === 'true' : b.dataset.v;
     save();
     $$('button', segEl).forEach((x) => x.classList.toggle('on', x === b));
     if (key === 'sound' && st.sound) sound(true);
@@ -1654,6 +1842,7 @@ views.examResult = () => {
       <div class="lbl" style="position:relative;z-index:1">${Math.round(ratio * 100)} % – das wäre etwa eine ${note}</div>
       <div class="chips" style="justify-content:center"><span class="chip">🎓 ${exam.type === 'cloze' ? 'Lückentext' : 'Vokabeltest'} · ${esc(ch.name)}</span></div>
     </div>
+    ${badgeBanner(exam.freshBadges || (exam.freshBadges = checkBadges()))}
     <h2>Auswertung</h2>
     <div class="list">${exam.answers.map((a) => {
       const c = db.cards.find((x) => x.id === a.id);
@@ -1711,15 +1900,16 @@ async function shareChapter(ch) {
 }
 
 /* ---------- Foto nur für die Prüfung (wird nicht gespeichert) ---------- */
-async function compressPhoto(file) {
+async function compressPhoto(file, crop) {
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
-    const scale = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+    const { sx, sy, sw, sh } = cropRect(img, crop);
+    const scale = Math.min(1, 1600 / Math.max(sw, sh));
     const c = document.createElement('canvas');
-    c.width = Math.round(img.naturalWidth * scale);
-    c.height = Math.round(img.naturalHeight * scale);
-    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    c.width = Math.round(sw * scale);
+    c.height = Math.round(sh * scale);
+    c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
     return await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.72));
   } finally {
     URL.revokeObjectURL(url);
