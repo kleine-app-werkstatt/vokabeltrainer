@@ -7,7 +7,10 @@
    angepasst an eingetragene Testtermine.
    ========================================================= */
 
-const STORE_KEY = 'vokabeltrainer.v1';
+// Testversion liegt unter /test/ und hat eigene, getrennte Daten
+const IS_TEST = /\/test\//.test(location.pathname);
+const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
+if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
 const BOX_NAMES = ['Neu', 'Fach 1', 'Fach 2', 'Fach 3', 'Fach 4', 'Fach 5'];

@@ -1,5 +1,10 @@
 // Offline-Cache. Bei jeder neuen Version VERSION erhöhen.
-const VERSION = 'v9';
+// Der Cache-Name enthält den Pfad, damit sich Test- und Echtversion (und andere Apps
+// auf derselben Domain) nicht gegenseitig die Caches löschen.
+const SCOPE = new URL(self.registration.scope).pathname; // z. B. /vokabeltrainer/ oder /vokabeltrainer/test/
+const VERSION = SCOPE + 'v10';
+// Eigene ältere Caches dieser Version (oder alte Namen wie 'v9') – nie die einer anderen App/Version
+const isOwnOldCache = (k) => k !== VERSION && ((k.startsWith(SCOPE) && !k.slice(SCOPE.length).includes('/')) || /^v\d+$/.test(k));
 const CORE = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'fonts/nunito-latin-wght-normal.woff2', 'fonts/nunito-latin-ext-wght-normal.woff2', 'vendor/tesseract/tesseract.min.js'];
 const OCR = ['vendor/tesseract/worker.min.js', 'vendor/tesseract/core/tesseract-core-simd-lstm.wasm.js',
@@ -9,7 +14,7 @@ self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(CORE)).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', (e) => {
-  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
+  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter(isOwnOldCache).map((k) => caches.delete(k))))
     .then(() => self.clients.claim())
     .then(() => caches.open(VERSION).then((c) => c.addAll(OCR)).catch(() => {})));
 });

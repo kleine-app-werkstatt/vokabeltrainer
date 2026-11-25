@@ -4,12 +4,19 @@ Private Web-App (PWA) für zwei Kinder (6. und 8. Klasse, iPhones) zum Vokabelle
 Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
 
 ## Stand
-- Live: https://marcelmelter.github.io/vokabeltrainer/ (GitHub Pages, Branch `main`, root)
-- Repo: `marcelmelter/vokabeltrainer` (öffentlich). Claude ist direkt verbunden (GitHub-Integration im
-  Claude-Admin aktiviert, Claude GitHub App auf dem Repo installiert) und pusht selbst auf `main`.
-- Offen: Vorlesefunktion auf echten iPhones prüfen (Testknopf mit Diagnose unter „Mein Bereich“);
-  Texterkennung mit den Testseiten (`testseite-englisch`, `testseite-franzoesisch`, frei erfunden) auf echten
-  iPhones testen. Erwartet: alle 12 Vokabeln je Seite, ein OCR-Fehler „môgen“ statt „mögen“.
+- Echtversion (Kinder): https://kleine-app-werkstatt.github.io/vokabeltrainer/
+- Testversion (nur Vater): https://kleine-app-werkstatt.github.io/vokabeltrainer/test/
+- Repo: `kleine-app-werkstatt/vokabeltrainer` (öffentlich; GitHub-Konto wurde von „marcelmelter“ umbenannt).
+  Claude ist direkt verbunden und pusht selbst auf `main`; GitHub Pages veröffentlicht `main` (root).
+- Offen: Vorlesefunktion und Texterkennung (Testseiten) auf echten iPhones prüfen.
+
+## Arbeitsweise Test → Echt (verbindlich)
+- Änderungen IMMER nur im Ordner `test/` machen und pushen. Nutzer testet auf seinem iPhone („Vokabeln TEST“).
+- Erst nach ausdrücklichem „übernehmen“ des Nutzers `sh tools/promote.sh` ausführen, committen, pushen.
+- Testversion erkennt sich am Pfad `/test/`: eigener localStorage-Schlüssel (`…v1.test`), Banner „TESTVERSION“,
+  eigenes Symbol/Manifest (`test/icons`, `test/manifest.webmanifest` werden nicht übernommen).
+- Service-Worker-Caches sind pro Pfad benannt; bei Änderungen `VERSION` in `test/sw.js` erhöhen.
+- Keine echten Namen, Nummern oder Fotos der Kinder in Chats oder im Repo.
 
 ## Entscheidungen
 - Kein Server, keine laufende KI-Nutzung, keine Kosten. Alles läuft offline auf dem Gerät (localStorage).
@@ -23,4 +30,3 @@ Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
 
 ## Technik
 - Reines HTML/CSS/JS ohne Build. Texterkennung tesseract.js (vendor/, Apache-2.0), Schrift Nunito (fonts/, OFL).
-- Bei jeder Änderung an App-Dateien `VERSION` in `sw.js` erhöhen.
