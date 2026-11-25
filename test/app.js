@@ -10,7 +10,7 @@
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
-const APP_VERSION = '25.11.2026 d'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
+const APP_VERSION = '25.11.2026 e'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
@@ -953,16 +953,27 @@ function analyzeTable(canvas) {
   const sm = new Float64Array(W);
   let acc = 0;
   for (let x = 0; x < W; x++) { acc += prof[x]; if (x >= k) acc -= prof[x - k]; sm[x - (k >> 1) < 0 ? 0 : x - (k >> 1)] = acc / k; }
-  const nz = [...sm].filter((v) => v > 0).sort((a, b) => a - b);
-  const typical = nz.length ? nz[Math.floor(nz.length * 0.6)] : 1;
-  const cuts = [];
-  const win = Math.round(W * 0.03);
-  for (let x = Math.round(W * 0.12); x < W * 0.92; x++) {
-    if (sm[x] > typical * 0.12) continue;
+  // Spaltengrenzen nur innerhalb der Tabelle suchen (Ränder außerhalb der Linien zählen nicht)
+  const xs0 = lines.map((l) => l.x0).sort((a, b) => a - b), xs1 = lines.map((l) => l.x1).sort((a, b) => a - b);
+  const tx0 = lines.length ? xs0[xs0.length >> 1] : 0, tx1 = lines.length ? xs1[xs1.length >> 1] : W;
+  const span = Math.max(1, tx1 - tx0);
+  const cands = [];
+  const win = Math.round(W * 0.02), reach = Math.round(span * 0.2);
+  for (let x = Math.round(tx0 + span * 0.08); x < tx1 - span * 0.08; x++) {
     let isMin = true;
     for (let d = -win; d <= win && isMin; d++) { const xx = x + d; if (xx >= 0 && xx < W && sm[xx] < sm[x]) isMin = false; }
-    if (isMin && (!cuts.length || x - cuts[cuts.length - 1] > W * 0.1)) cuts.push(x);
+    if (!isMin) continue;
+    let pl = 0, pr = 0;
+    for (let xx = Math.max(0, x - reach); xx < x; xx++) pl = Math.max(pl, sm[xx]);
+    for (let xx = x + 1; xx < Math.min(W, x + reach); xx++) pr = Math.max(pr, sm[xx]);
+    const depth = sm[x] / Math.max(1e-6, Math.min(pl, pr));
+    if (depth < 0.35) cands.push({ x, depth });
   }
+  const cuts = [];
+  for (const c of cands.sort((a, b) => a.depth - b.depth)) {
+    if (cuts.length < 3 && cuts.every((x) => Math.abs(x - c.x) > span * 0.12)) cuts.push(c.x);
+  }
+  cuts.sort((a, b) => a - b);
   // Beleuchtung ausgleichen (Schatten auf der Seite): Helligkeit relativ zur Umgebung
   const gn = new Uint8Array(N);
   const Rf = R * 3;
@@ -1012,7 +1023,7 @@ function tableRegion(tbl) {
   const med = gaps[gaps.length >> 1];
   let best = [0, 0], start = 0;
   for (let i = 1; i <= ls.length; i++) {
-    if (i === ls.length || ls[i].mean - ls[i - 1].mean > med * 2.6) {
+    if (i === ls.length || ls[i].mean - ls[i - 1].mean > med * 4.2) { // höhere Abstände = Bildzeilen, z. B. ein Eimer
       if (i - 1 - start > best[1] - best[0]) best = [start, i - 1];
       start = i;
     }
