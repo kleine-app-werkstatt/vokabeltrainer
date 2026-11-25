@@ -29,4 +29,8 @@ Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
 - Kommerzialisierung vorerst nicht; Hinweise (App-Store-Abo vs. Web-Abo, Arbeitgeber, Datenschutz, Steuern) wurden besprochen.
 
 ## Technik
+- Texterkennung bei Buchseiten mit Tabellenlinien (`analyzeTable`/`tableRows` in app.js): Linien finden →
+  Bild entlang der Linien begradigen + Beleuchtung ausgleichen → jede Spalte einzeln lesen (PSM 4) → Wörter
+  per Zeile/Spalte zuordnen; deutsche Spalte = kürzeste Einträge. Zum Vergleich wird immer auch klassisch
+  gelesen (PSM 6, Standard von tesseract.js) und das Ergebnis mit mehr vollständigen Vokabeln genommen.
 - Reines HTML/CSS/JS ohne Build. Texterkennung tesseract.js (vendor/, Apache-2.0), Schrift Nunito (fonts/, OFL).

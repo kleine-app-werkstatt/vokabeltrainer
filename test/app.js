@@ -844,6 +844,229 @@ function oddLetters(text, lang) {
   return [...text.toLowerCase()].some((ch) => /\p{L}/u.test(ch) && !allowed.test(ch));
 }
 
+/* ---------- Tabellen-Erkennung (Schulbuch-Vokabelseiten mit Linien) ----------
+   Fotos von Buchseiten sind oft schräg oder gewölbt. Statt Tesseract-Zeilen zu nutzen,
+   werden die Tabellenlinien gesucht: Ihr Verlauf zeigt, welche Wörter in dieselbe Zeile gehören.
+   Danach werden die Linien aus dem Bild entfernt, damit sie nicht als Text gelesen werden. */
+function analyzeTable(canvas) {
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.getImageData(0, 0, W, H);
+  const px = img.data;
+  const N = W * H;
+  const g = new Uint8Array(N);
+  for (let i = 0; i < N; i++) g[i] = px[i * 4];
+  // Dunkle Pixel relativ zum örtlichen Hintergrund (ungleichmäßiges Licht)
+  const IW = W + 1;
+  const I = new Float64Array(IW * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let row = 0;
+    for (let x = 0; x < W; x++) { row += g[y * W + x]; I[(y + 1) * IW + x + 1] = I[y * IW + x + 1] + row; }
+  }
+  const R = Math.max(12, Math.round(W / 90));
+  const D = new Uint8Array(N);
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - R), y1 = Math.min(H, y + R + 1);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - R), x1 = Math.min(W, x + R + 1);
+      const sum = I[y1 * IW + x1] - I[y0 * IW + x1] - I[y1 * IW + x0] + I[y0 * IW + x0];
+      const mean = sum / ((y1 - y0) * (x1 - x0));
+      D[y * W + x] = g[y * W + x] < mean - 18 ? 1 : 0;
+    }
+  }
+  // Linien-Kandidaten: lange waagerechte dunkle Strecken (± 1 Pixel für schräge Linien)
+  const L = Math.max(40, Math.round(W * 0.03));
+  const M = new Uint8Array(N);
+  const pref = new Int32Array(W + 1);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      pref[x + 1] = pref[x] + (D[i] | D[i - W] | D[i + W]);
+    }
+    const need = Math.floor(0.92 * L);
+    let mark = -1;
+    for (let x = 0; x + L <= W; x++) {
+      if (pref[x + L] - pref[x] >= need) mark = x + L;
+      if (x < mark) M[y * W + x] = 1;
+    }
+  }
+  // Zusammenhängende Linien suchen (verkleinertes Raster), nur breite behalten
+  const s = 4, GW = Math.ceil(W / s), GH = Math.ceil(H / s);
+  const G = new Uint8Array(GW * GH);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (M[y * W + x]) G[((y / s) | 0) * GW + ((x / s) | 0)] = 1;
+  const lab = new Int32Array(GW * GH);
+  const comps = [];
+  for (let start = 0; start < GW * GH; start++) {
+    if (!G[start] || lab[start]) continue;
+    const id = comps.length + 1, stack = [start], cells = [];
+    lab[start] = id;
+    let minx = Infinity, maxx = -1, miny = Infinity, maxy = -1;
+    while (stack.length) {
+      const c = stack.pop(), cx = c % GW, cy = (c / GW) | 0;
+      cells.push(c);
+      if (cx < minx) minx = cx; if (cx > maxx) maxx = cx; if (cy < miny) miny = cy; if (cy > maxy) maxy = cy;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= GW || ny >= GH) continue;
+        const n = ny * GW + nx;
+        if (G[n] && !lab[n]) { lab[n] = id; stack.push(n); }
+      }
+    }
+    comps.push({ cells, minx, maxx, miny, maxy });
+  }
+  const BIN = 8; // Rasterzellen je Stützstelle
+  const nb = Math.ceil(GW / BIN);
+  let lines = comps.filter((c) => (c.maxx - c.minx) * s >= 0.15 * W && (c.maxy - c.miny) * s < 0.08 * H).map((c) => {
+    const ys = Array.from({ length: nb }, () => []);
+    for (const cell of c.cells) ys[Math.floor((cell % GW) / BIN)].push(((cell / GW) | 0) * s + s / 2);
+    const med = ys.map((a) => (a.length ? a.sort((p, q) => p - q)[a.length >> 1] : null));
+    const known = med.map((v, i) => [i, v]).filter(([, v]) => v !== null);
+    const yAt = med.map((v, i) => {
+      if (v !== null) return v;
+      const left = [...known].reverse().find(([k]) => k < i), right = known.find(([k]) => k > i);
+      if (left && right) return left[1] + ((right[1] - left[1]) * (i - left[0])) / (right[0] - left[0]);
+      return (left || right)[1];
+    });
+    return { yAt, mean: yAt.reduce((a, b) => a + b, 0) / yAt.length };
+  }).sort((a, b) => a.mean - b.mean);
+  // Doppelt erfasste Linien zusammenfassen
+  lines = lines.filter((l, i) => i === 0 || Math.abs(l.mean - lines[i - 1].mean) > H * 0.006);
+  const lineY = (l, x) => l.yAt.at(Math.min(nb - 1, Math.max(0, Math.floor(x / (s * BIN)))));
+
+  // Linien entfernen (dort, wo kein Buchstabe die Linie senkrecht kreuzt) → sauberes Schwarz-Weiß-Bild
+  const off = Math.max(4, Math.round(W / 400));
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    let near = 0;
+    for (let d = -3; d <= 3 && !near; d++) { const yy = y + d; if (yy >= 0 && yy < H && M[yy * W + x]) near = 1; }
+    if (near) {
+      const up = y - off >= 0 && D[i - off * W], dn = y + off < H && D[i + off * W];
+      if (!(up && dn)) D[i] = 0;
+    }
+  }
+
+  // Spalten: Lücken in der senkrechten Projektion
+  const prof = new Float64Array(W);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) prof[x] += D[y * W + x];
+  const k = Math.max(15, Math.round(W / 85));
+  const sm = new Float64Array(W);
+  let acc = 0;
+  for (let x = 0; x < W; x++) { acc += prof[x]; if (x >= k) acc -= prof[x - k]; sm[x - (k >> 1) < 0 ? 0 : x - (k >> 1)] = acc / k; }
+  const nz = [...sm].filter((v) => v > 0).sort((a, b) => a - b);
+  const typical = nz.length ? nz[Math.floor(nz.length * 0.6)] : 1;
+  const cuts = [];
+  const win = Math.round(W * 0.03);
+  for (let x = Math.round(W * 0.12); x < W * 0.92; x++) {
+    if (sm[x] > typical * 0.12) continue;
+    let isMin = true;
+    for (let d = -win; d <= win && isMin; d++) { const xx = x + d; if (xx >= 0 && xx < W && sm[xx] < sm[x]) isMin = false; }
+    if (isMin && (!cuts.length || x - cuts[cuts.length - 1] > W * 0.1)) cuts.push(x);
+  }
+  // Beleuchtung ausgleichen (Schatten auf der Seite): Helligkeit relativ zur Umgebung
+  const gn = new Uint8Array(N);
+  const Rf = R * 3;
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - Rf), y1 = Math.min(H, y + Rf + 1);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - Rf), x1 = Math.min(W, x + Rf + 1);
+      const mean = (I[y1 * IW + x1] - I[y0 * IW + x1] - I[y1 * IW + x0] + I[y0 * IW + x0]) / ((y1 - y0) * (x1 - x0));
+      gn[y * W + x] = Math.min(255, Math.round((g[y * W + x] * 235) / Math.max(40, mean)));
+    }
+  }
+  // Entzerren: jede gefundene Linie wird waagerecht gezogen (gleicht Schräglage und Wölbung aus)
+  let straight = null, targets = null;
+  if (lines.length >= 3) {
+    targets = lines.map((l) => l.mean);
+    const out = new Uint8ClampedArray(N * 4);
+    const nL = lines.length;
+    for (let x = 0; x < W; x++) {
+      const ys = lines.map((l) => lineY(l, x));
+      let k = 0;
+      for (let y = 0; y < H; y++) {
+        while (k < nL - 1 && y > targets[k + 1]) k++;
+        let sy;
+        if (y <= targets[0]) sy = y + (ys[0] - targets[0]);
+        else if (y >= targets[nL - 1]) sy = y + (ys[nL - 1] - targets[nL - 1]);
+        else {
+          const t = (y - targets[k]) / (targets[k + 1] - targets[k]);
+          sy = ys[k] + t * (ys[k + 1] - ys[k]);
+        }
+        const yi = Math.min(H - 1, Math.max(0, Math.round(sy)));
+        const v = gn[yi * W + x], o = (y * W + x) * 4;
+        out[o] = out[o + 1] = out[o + 2] = v; out[o + 3] = 255;
+      }
+    }
+    straight = document.createElement('canvas');
+    straight.width = W; straight.height = H;
+    straight.getContext('2d').putImageData(new ImageData(out, W, H), 0, 0);
+  }
+  return { straight, targets, lines, lineY, cuts, W, H };
+}
+
+// Wörter der Texterkennung in Tabellenzeilen und -spalten einsortieren
+function tableRows(data, tbl) {
+  const words = [];
+  for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) for (const w of l.words || []) {
+    if (!w.text || !w.text.trim()) continue;
+    if (w.confidence < 35 || !/\p{L}/u.test(w.text) || (!/\p{L}{2}/u.test(w.text) && w.confidence < 80)) continue; // Linienreste, Bildrauschen
+    words.push(w);
+  }
+  if (!words.length || tbl.lines.length < 3 || !tbl.cuts.length) return null;
+  const cells = new Map();
+  for (const w of words) {
+    const cx = (w.bbox.x0 + w.bbox.x1) / 2, cy = (w.bbox.y0 + w.bbox.y1) / 2;
+    const row = tbl.targets ? tbl.targets.filter((t) => t < cy).length : tbl.lines.filter((l) => tbl.lineY(l, cx) < cy).length;
+    const col = tbl.cuts.filter((c) => c < w.bbox.x0 + (w.bbox.x1 - w.bbox.x0) * 0.3).length;
+    const key = row * 10 + col;
+    if (!cells.has(key)) cells.set(key, []);
+    cells.get(key).push(w);
+  }
+  const cellText = (ws) => {
+    if (!ws) return '';
+    const h = ws.reduce((a, w) => a + (w.bbox.y1 - w.bbox.y0), 0) / ws.length;
+    const sorted = [...ws].sort((a, b) => a.bbox.y0 - b.bbox.y0);
+    const lines = [];
+    for (const w of sorted) {
+      const ln = lines.find((l) => Math.abs(l.y - (w.bbox.y0 + w.bbox.y1) / 2) < h * 0.6);
+      if (ln) ln.ws.push(w); else lines.push({ y: (w.bbox.y0 + w.bbox.y1) / 2, ws: [w] });
+    }
+    return lines.sort((a, b) => a.y - b.y).map((l) => l.ws.sort((a, b) => a.bbox.x0 - b.bbox.x0).map((w) => w.text).join(' ')).join(' ');
+  };
+  const nCols = tbl.cuts.length + 1;
+  const rowsRaw = [];
+  for (let r = 0; r <= tbl.lines.length; r++) {
+    const cols = [];
+    let lowConf = [];
+    for (let c = 0; c < nCols; c++) {
+      const ws = cells.get(r * 10 + c);
+      cols.push(cellText(ws));
+      if (ws) lowConf.push(...ws.filter((w) => w.confidence < 80).map((w) => cleanSide(w.text).toLowerCase()).filter((t) => t.length >= 2));
+    }
+    if (cols.some((t) => t.trim())) rowsRaw.push({ cols, low: lowConf });
+  }
+  // Welche Spalte ist Deutsch? Die mit den kürzesten Einträgen (Beispielsätze sind lang).
+  let gCol = 1;
+  if (nCols >= 3) {
+    const avg = (c) => { const t = rowsRaw.map((r) => r.cols[c]).filter(Boolean); return t.reduce((a, x) => a + x.split(/\s+/).length, 0) / (t.length || 1); };
+    let best = Infinity;
+    for (let c = 1; c < nCols; c++) { const a = avg(c); if (a < best) { best = a; gCol = c; } }
+  }
+  return rowsRaw.map((r) => {
+    const fRaw = stripIpa(r.cols[0]);
+    const mid = r.cols.filter((_, i) => i !== 0 && i !== gCol).join(' ');
+    const f = cleanSide(fRaw), gg = cleanSide(r.cols[gCol] || '');
+    return [f, gg, exampleFrom(mid, fRaw), { f: isUnsure(f, r.low), g: isUnsure(gg, r.low) }];
+  }).filter(([a, b]) => (a + b).replace(/[^\p{L}]/gu, '').length >= 2);
+}
+
+// Lautschrift hinter dem Wort abschneiden: „to catch, caught [kætʃ; kɔ:t]“ → „to catch, caught“
+function stripIpa(t) {
+  let s = (t || '').replace(/^\s*\d+\s+/, '');
+  const cut = s.search(/[[|{\]]/);
+  if (cut > 0) s = s.slice(0, cut);
+  return s.split(/\s+/).filter((w) => !/^['ˈ`´]/.test(w) && !/[ːˈ]/.test(w)).join(' ');
+}
+
 // Wörter, bei denen die Texterkennung unsicher war (Konfidenz < 80 %)
 function lowWords(l) {
   return (l.words || []).filter((w) => typeof w.confidence === 'number' && w.confidence < 80)
@@ -973,10 +1196,44 @@ views.scan = async () => {
   try {
     const pageBlob = await compressPhoto(file, crop).catch(() => null);
     const canvas = await prepareImage(file, crop);
+    // Seiten mit Tabellenlinien: Linien finden und entfernen, Wörter danach Zeilen/Spalten zuordnen
+    let tbl = null;
+    try { tbl = analyzeTable(canvas); } catch (e) { console.warn(e); }
+    const useTable = !!(tbl && tbl.lines.length >= 3 && tbl.cuts.length >= 1);
     const worker = await getWorker([LANGS[ch.lang].ocr, 'deu']);
+    let rows = null;
+    if (useTable) {
+      // Jede Spalte einzeln lesen (einfacheres Layout für die Texterkennung), Wörter danach per Linien zuordnen
+      const words = [];
+      const edges = [0, ...tbl.cuts, canvas.width];
+      await worker.setParameters({ tessedit_pageseg_mode: '4' });
+      try {
+        for (let c = 0; c < edges.length - 1; c++) {
+          const x0 = Math.max(0, edges[c] - 12), x1 = Math.min(canvas.width, edges[c + 1] + 12);
+          const strip = document.createElement('canvas');
+          strip.width = x1 - x0; strip.height = canvas.height;
+          strip.getContext('2d').drawImage(tbl.straight || canvas, x0, 0, strip.width, strip.height, 0, 0, strip.width, strip.height);
+          const s0 = $('#pstatus');
+          if (s0) s0.textContent = `Spalte ${c + 1} von ${edges.length - 1} wird gelesen …`;
+          const { data } = await worker.recognize(strip, {}, { blocks: true });
+          if (cancelled) return;
+          for (const b of data.blocks || []) for (const pg of b.paragraphs || []) for (const ln of pg.lines || []) for (const w of ln.words || []) {
+            words.push({ ...w, bbox: { x0: w.bbox.x0 + x0, x1: w.bbox.x1 + x0, y0: w.bbox.y0, y1: w.bbox.y1 } });
+          }
+        }
+      } finally {
+        await worker.setParameters({ tessedit_pageseg_mode: '6' }); // Standard von tesseract.js
+      }
+      rows = tableRows({ blocks: [{ paragraphs: [{ lines: [{ words }] }] }] }, tbl);
+    }
+    // Zum Vergleich immer auch klassisch lesen; genommen wird das Ergebnis mit mehr vollständigen Vokabeln
+    const complete = (rs) => (rs || []).filter((r) => r[0] && r[1] && !looksLikeJunk(r[0], r[1])).length;
+    const s1 = $('#pstatus');
+    if (s1 && useTable) s1.textContent = 'Gegenprobe …';
     const { data } = await worker.recognize(canvas, {}, { text: true, blocks: true });
     if (cancelled) return;
-    const rows = buildRows(linesFromResult(data).filter((l) => l.text || l.conf > 35));
+    const plainRows = buildRows(linesFromResult(data).filter((l) => l.text || l.conf > 35));
+    if (!rows || complete(plainRows) > complete(rows)) rows = plainRows;
     URL.revokeObjectURL(preview);
     if (!rows.length) {
       toast('Keine Wörter gefunden – probier es mit mehr Licht nochmal');
