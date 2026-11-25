@@ -10,6 +10,7 @@
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
+const APP_VERSION = '25.11.2026 c'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
@@ -927,7 +928,7 @@ function analyzeTable(canvas) {
       if (left && right) return left[1] + ((right[1] - left[1]) * (i - left[0])) / (right[0] - left[0]);
       return (left || right)[1];
     });
-    return { yAt, mean: yAt.reduce((a, b) => a + b, 0) / yAt.length };
+    return { yAt, mean: yAt.reduce((a, b) => a + b, 0) / yAt.length, x0: c.minx * s, x1: (c.maxx + 1) * s };
   }).sort((a, b) => a.mean - b.mean);
   // Doppelt erfasste Linien zusammenfassen
   lines = lines.filter((l, i) => i === 0 || Math.abs(l.mean - lines[i - 1].mean) > H * 0.006);
@@ -1003,12 +1004,33 @@ function analyzeTable(canvas) {
   return { straight, targets, lines, lineY, cuts, W, H };
 }
 
+// Bereich der eigentlichen Vokabeltabelle (Anteile 0–1): die längste Folge gleichmäßig verteilter Linien
+function tableRegion(tbl) {
+  const ls = tbl.lines;
+  if (ls.length < 4) return null;
+  const gaps = ls.slice(1).map((l, i) => l.mean - ls[i].mean).sort((a, b) => a - b);
+  const med = gaps[gaps.length >> 1];
+  let best = [0, 0], start = 0;
+  for (let i = 1; i <= ls.length; i++) {
+    if (i === ls.length || ls[i].mean - ls[i - 1].mean > med * 2.6) {
+      if (i - 1 - start > best[1] - best[0]) best = [start, i - 1];
+      start = i;
+    }
+  }
+  const grp = ls.slice(best[0], best[1] + 1);
+  if (grp.length < 5) return null;
+  const y0 = Math.max(0, grp[0].mean - med * 0.6), y1 = Math.min(tbl.H, grp[grp.length - 1].mean + med * 0.6);
+  const x0 = Math.max(0, Math.min(...grp.map((l) => l.x0)) - tbl.W * 0.02), x1 = Math.min(tbl.W, Math.max(...grp.map((l) => l.x1)) + tbl.W * 0.02);
+  const reg = { x0: x0 / tbl.W, y0: y0 / tbl.H, w: (x1 - x0) / tbl.W, h: (y1 - y0) / tbl.H };
+  return reg.w * reg.h < 0.9 ? reg : null; // nur zuschneiden, wenn es wirklich kleiner wird
+}
+
 // Wörter der Texterkennung in Tabellenzeilen und -spalten einsortieren
 function tableRows(data, tbl) {
   const words = [];
   for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) for (const w of l.words || []) {
     if (!w.text || !w.text.trim()) continue;
-    if (w.confidence < 35 || !/\p{L}/u.test(w.text) || (!/\p{L}{2}/u.test(w.text) && w.confidence < 80)) continue; // Linienreste, Bildrauschen
+    if (!/\p{L}/u.test(w.text) || (!/\p{L}{2}/u.test(w.text) && w.confidence < 80) || (w.confidence < 35 && !(w.confidence >= 15 && /\p{L}{4}/u.test(w.text)))) continue; // Linienreste, Bildrauschen
     words.push(w);
   }
   if (!words.length || tbl.lines.length < 3 || !tbl.cuts.length) return null;
@@ -1195,10 +1217,21 @@ views.scan = async () => {
   };
   try {
     const pageBlob = await compressPhoto(file, crop).catch(() => null);
-    const canvas = await prepareImage(file, crop);
-    // Seiten mit Tabellenlinien: Linien finden und entfernen, Wörter danach Zeilen/Spalten zuordnen
+    const fullCanvas = await prepareImage(file, crop);
+    let canvas = fullCanvas;
+    // Seiten mit Tabellenlinien: Linien finden, Tabelle automatisch zuschneiden und in voller Auflösung lesen
     let tbl = null;
-    try { tbl = analyzeTable(canvas); } catch (e) { console.warn(e); }
+    try {
+      tbl = analyzeTable(canvas);
+      const reg = tbl && tableRegion(tbl);
+      if (reg) {
+        const c0 = crop || { x: 0, y: 0, w: 1, h: 1 };
+        const crop2 = { x: c0.x + reg.x0 * c0.w, y: c0.y + reg.y0 * c0.h, w: reg.w * c0.w, h: reg.h * c0.h };
+        const zoomed = await prepareImage(file, crop2);
+        const t2 = analyzeTable(zoomed);
+        if (t2 && t2.lines.length >= 3 && t2.cuts.length >= 1) { canvas = zoomed; tbl = t2; }
+      }
+    } catch (e) { console.warn(e); }
     const useTable = !!(tbl && tbl.lines.length >= 3 && tbl.cuts.length >= 1);
     const worker = await getWorker([LANGS[ch.lang].ocr, 'deu']);
     let rows = null;
@@ -1230,7 +1263,7 @@ views.scan = async () => {
     const complete = (rs) => (rs || []).filter((r) => r[0] && r[1] && !looksLikeJunk(r[0], r[1])).length;
     const s1 = $('#pstatus');
     if (s1 && useTable) s1.textContent = 'Gegenprobe …';
-    const { data } = await worker.recognize(canvas, {}, { text: true, blocks: true });
+    const { data } = await worker.recognize(fullCanvas, {}, { text: true, blocks: true });
     if (cancelled) return;
     const plainRows = buildRows(linesFromResult(data).filter((l) => l.text || l.conf > 35));
     if (!rows || complete(plainRows) > complete(rows)) rows = plainRows;
@@ -1820,7 +1853,7 @@ views.me = () => {
       <p>Hast du einen Testtermin eingetragen, plant die App so, dass jedes Wort vor dem Test oft genug drankommt – spätestens am Tag davor nochmal alle.</p>
       <p style="margin:0">Am besten jeden Tag 10 Minuten – dann bleiben die Wörter für immer im Kopf. 🧠</p>
     </div>
-    <p class="muted tiny center" style="margin-top:24px">Texterkennung: Tesseract (Apache-2.0) · Schrift: Nunito (OFL) · alles läuft offline auf dem Gerät</p>`;
+    <p class="muted tiny center" style="margin-top:24px">Version ${APP_VERSION}${IS_TEST ? ' (Test)' : ''} · Texterkennung: Tesseract (Apache-2.0) · Schrift: Nunito (OFL) · alles läuft offline auf dem Gerät</p>`;
   $('#back').onclick = () => go('home');
   $('#editprof').onclick = editProfile;
   $$('[data-set]').forEach((segEl) => $$('button', segEl).forEach((b) => (b.onclick = () => {

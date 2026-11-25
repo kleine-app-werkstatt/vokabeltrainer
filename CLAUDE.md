@@ -15,7 +15,9 @@ Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
 - Erst nach ausdrücklichem „übernehmen“ des Nutzers `sh tools/promote.sh` ausführen, committen, pushen.
 - Testversion erkennt sich am Pfad `/test/`: eigener localStorage-Schlüssel (`…v1.test`), Banner „TESTVERSION“,
   eigenes Symbol/Manifest (`test/icons`, `test/manifest.webmanifest` werden nicht übernommen).
-- Service-Worker-Caches sind pro Pfad benannt; bei Änderungen `VERSION` in `test/sw.js` erhöhen.
+- Service-Worker-Caches sind pro Pfad benannt; bei Änderungen `VERSION` in `test/sw.js` erhöhen und
+  `APP_VERSION` in `test/app.js` anpassen (wird unter „Mein Bereich“ angezeigt, zeigt dem Nutzer, ob das Update da ist).
+- Lokales Testfoto `test/tmp-debug.jpg` (Schulbuchseite) ist per .git/info/exclude ausgeschlossen – nie committen.
 - Keine echten Namen, Nummern oder Fotos der Kinder in Chats oder im Repo.
 
 ## Entscheidungen

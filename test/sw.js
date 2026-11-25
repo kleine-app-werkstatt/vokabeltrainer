@@ -2,7 +2,7 @@
 // Der Cache-Name enthält den Pfad, damit sich Test- und Echtversion (und andere Apps
 // auf derselben Domain) nicht gegenseitig die Caches löschen.
 const SCOPE = new URL(self.registration.scope).pathname; // z. B. /vokabeltrainer/ oder /vokabeltrainer/test/
-const VERSION = SCOPE + 'v13';
+const VERSION = SCOPE + 'v14';
 // Eigene ältere Caches dieser Version (oder alte Namen wie 'v9') – nie die einer anderen App/Version
 const isOwnOldCache = (k) => k !== VERSION && ((k.startsWith(SCOPE) && !k.slice(SCOPE.length).includes('/')) || /^v\d+$/.test(k));
 const CORE = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
