@@ -204,6 +204,24 @@ function check(input, answer) {
   return 'wrong';
 }
 
+// Antwort auf Deutsch (Fremdsprache → Deutsch): Hier zählt nur die Bedeutung, nicht die Rechtschreibung.
+// Groß/klein, Umlaute (ä/ae), ß/ss und kleine Tippfehler werden toleriert.
+function foldGerman(s) {
+  return s.replace(/ä|ae/g, 'a').replace(/ö|oe/g, 'o').replace(/ü|ue/g, 'u').replace(/ß/g, 'ss').replace(/[^a-z0-9 ]/g, '');
+}
+function checkMeaning(input, answer) {
+  const r = check(input, answer);
+  if (r === 'right') return 'right';
+  const given = normalize(input);
+  if (!given) return 'wrong';
+  if (r !== 'wrong') return 'spelling';
+  const opts = variants(answer).map(foldGerman);
+  const g = [given, given.replace(ARTICLES, ''), given.replace(/^sich /, '')].map(foldGerman);
+  const allowed = (len) => (len <= 5 ? 0 : len <= 8 ? 1 : 2); // kurze Wörter: keine Tippfehler (Haus ≠ Maus)
+  if (opts.some((o) => g.some((x) => x === o || lev(x, o) <= allowed(o.length)))) return 'spelling';
+  return 'wrong';
+}
+
 /* ---------- UI-Helfer ---------- */
 const app = $('#app');
 let toastTimer;
@@ -1085,13 +1103,15 @@ views.learn = () => {
     if (!correct) $('#qcard').classList.add('shake');
     const msg = {
       right: ['ok', pick(PRAISE)],
+      spelling: ['ok', pick(PRAISE)],
       accent: strict ? ['warn', 'Fast! Achte auf die Akzente – im Test wäre das ein Fehler.'] : ['ok', 'Richtig – aber achte auf die Akzente!'],
       typo: strict ? ['warn', 'Fast! Achte auf die Schreibweise – im Test wäre das ein Fehler.'] : ['ok', 'Fast! Kleiner Tippfehler.'],
       wrong: ['bad', given ? 'Leider falsch.' : 'Kein Problem – so heißt es:'],
     }[kind];
     area.innerHTML = `
       <div class="result ${msg[0]}"><strong>${msg[1]}</strong>
-        ${kind !== 'right' ? `<div class="sol">${esc(answer)}</div>` : ''}
+        ${kind !== 'right' && kind !== 'spelling' ? `<div class="sol">${esc(answer)}</div>` : ''}
+        ${kind === 'spelling' ? `<div class="small muted" style="margin-top:4px">Im Buch steht: ${esc(answer)}</div>` : ''}
         <div class="row" style="margin-top:10px;color:var(--text)">${speakBtn('id="say2"', true)}<span class="small">${dir === 'f2g' || kind === 'right' ? `<strong>${esc(card.foreign)}</strong><br>` : ''}<span class="muted tiny">Anhören & nachsprechen · 2× tippen = langsam</span></span></div>
         ${(kind === 'wrong' || (strict && kind !== 'right')) && given ? `<div class="small muted" style="margin-top:4px">Du hast geschrieben: ${esc(given)}</div>` : ''}
       </div>
@@ -1132,7 +1152,7 @@ views.learn = () => {
     $('#aform').onsubmit = (e) => {
       e.preventDefault();
       if (!inp.value.trim()) return inp.focus();
-      showResult(check(inp.value, answer), inp.value.trim());
+      showResult(dir === 'f2g' ? checkMeaning(inp.value, answer) : check(inp.value, answer), inp.value.trim());
     };
     $('#dunno').onclick = () => showResult('wrong', '');
   } else {
