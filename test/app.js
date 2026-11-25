@@ -10,7 +10,7 @@
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
-const APP_VERSION = '25.11.2026 c'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
+const APP_VERSION = '25.11.2026 d'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
@@ -1030,10 +1030,25 @@ function tableRows(data, tbl) {
   const words = [];
   for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) for (const w of l.words || []) {
     if (!w.text || !w.text.trim()) continue;
-    if (!/\p{L}/u.test(w.text) || (!/\p{L}{2}/u.test(w.text) && w.confidence < 80) || (w.confidence < 35 && !(w.confidence >= 15 && /\p{L}{4}/u.test(w.text)))) continue; // Linienreste, Bildrauschen
+    const t = w.text.trim();
+    const dots = /^(\.{2,}|…)$/.test(t); // „the … the“, „je … desto“
+    const hasLetter = /\p{L}/u.test(t), twoLetters = /\p{L}{2}/u.test(t);
+    const okConf = w.confidence >= 35 || (w.confidence >= 15 && /\p{L}{4}/u.test(t));
+    const keep = dots || (hasLetter && (twoLetters || w.confidence >= 80) && okConf);
+    if (!keep) continue; // Linienreste, Bildrauschen
     words.push(w);
   }
   if (!words.length || tbl.lines.length < 3 || !tbl.cuts.length) return null;
+  const src = tbl.straight;
+  if (src) {
+    const SW = src.width, SH = src.height, pd = src.getContext('2d').getImageData(0, 0, SW, SH).data;
+    for (const w of words) {
+      let d = 0, n = 0;
+      const xa = Math.max(0, w.bbox.x0), xb = Math.min(SW, w.bbox.x1), ya = Math.max(0, w.bbox.y0), yb = Math.min(SH, w.bbox.y1);
+      for (let y = ya; y < yb; y++) for (let x = xa; x < xb; x++) { n++; if (pd[(y * SW + x) * 4] < 140) d++; }
+      w.ink = n ? d / n : 0;
+    }
+  }
   const cells = new Map();
   for (const w of words) {
     const cx = (w.bbox.x0 + w.bbox.x1) / 2, cy = (w.bbox.y0 + w.bbox.y1) / 2;
@@ -1043,16 +1058,18 @@ function tableRows(data, tbl) {
     if (!cells.has(key)) cells.set(key, []);
     cells.get(key).push(w);
   }
-  const cellText = (ws) => {
-    if (!ws) return '';
+  const cellText = (ws, asTokens) => {
+    if (!ws) return asTokens ? [] : '';
     const h = ws.reduce((a, w) => a + (w.bbox.y1 - w.bbox.y0), 0) / ws.length;
     const sorted = [...ws].sort((a, b) => a.bbox.y0 - b.bbox.y0);
     const lines = [];
     for (const w of sorted) {
-      const ln = lines.find((l) => Math.abs(l.y - (w.bbox.y0 + w.bbox.y1) / 2) < h * 0.6);
-      if (ln) ln.ws.push(w); else lines.push({ y: (w.bbox.y0 + w.bbox.y1) / 2, ws: [w] });
+      const ln = lines.find((l) => Math.min(l.y1, w.bbox.y1) - Math.max(l.y0, w.bbox.y0) > 0.4 * Math.min(l.y1 - l.y0, w.bbox.y1 - w.bbox.y0));
+      if (ln) { ln.ws.push(w); ln.y0 = Math.min(ln.y0, w.bbox.y0); ln.y1 = Math.max(ln.y1, w.bbox.y1); }
+      else lines.push({ y0: w.bbox.y0, y1: w.bbox.y1, ws: [w] });
     }
-    return lines.sort((a, b) => a.y - b.y).map((l) => l.ws.sort((a, b) => a.bbox.x0 - b.bbox.x0).map((w) => w.text).join(' ')).join(' ');
+    const ordered = lines.sort((a, b) => a.y0 - b.y0).flatMap((l) => l.ws.sort((a, b) => a.bbox.x0 - b.bbox.x0));
+    return asTokens ? ordered : ordered.map((w) => w.text).join(' ');
   };
   const nCols = tbl.cuts.length + 1;
   const rowsRaw = [];
@@ -1061,7 +1078,7 @@ function tableRows(data, tbl) {
     let lowConf = [];
     for (let c = 0; c < nCols; c++) {
       const ws = cells.get(r * 10 + c);
-      cols.push(cellText(ws));
+      cols.push(c === 0 ? headword(cellText(ws, true)) : cellText(ws));
       if (ws) lowConf.push(...ws.filter((w) => w.confidence < 80).map((w) => cleanSide(w.text).toLowerCase()).filter((t) => t.length >= 2));
     }
     if (cols.some((t) => t.trim())) rowsRaw.push({ cols, low: lowConf });
@@ -1074,11 +1091,36 @@ function tableRows(data, tbl) {
     for (let c = 1; c < nCols; c++) { const a = avg(c); if (a < best) { best = a; gCol = c; } }
   }
   return rowsRaw.map((r) => {
-    const fRaw = stripIpa(r.cols[0]);
+    const fRaw = r.cols[0];
     const mid = r.cols.filter((_, i) => i !== 0 && i !== gCol).join(' ');
     const f = cleanSide(fRaw), gg = cleanSide(r.cols[gCol] || '');
     return [f, gg, exampleFrom(mid, fRaw), { f: isUnsure(f, r.low), g: isUnsure(gg, r.low) }];
   }).filter(([a, b]) => (a + b).replace(/[^\p{L}]/gu, '').length >= 2);
+}
+
+// Stichwort aus der ersten Spalte: Lautschrift dahinter abschneiden.
+// Erkennbar an Klammer/Strich/Apostroph am Anfang, Lautschrift-Zeichen – oder daran, dass das Wort
+// deutlich weniger „Tinte“ hat als das fett gedruckte Stichwort davor.
+function headword(tokens) {
+  if (tokens.length > 1) {
+    // Einzeilige Einträge strikt von links nach rechts (kleine Zeichen wie „…“ liegen sonst falsch)
+    const hs = tokens.map((w) => w.bbox.y1 - w.bbox.y0).sort((a, b) => a - b);
+    const top = Math.min(...tokens.map((w) => w.bbox.y0)), bottom = Math.max(...tokens.map((w) => w.bbox.y1));
+    if (bottom - top < hs[hs.length >> 1] * 1.8) tokens = [...tokens].sort((a, b) => a.bbox.x0 - b.bbox.x0);
+  }
+  const keep = [];
+  let maxInk = 0;
+  for (const w of tokens) {
+    const t = w.text;
+    const ipaStart = /^[[({|'‘‚`´ˈ]/.test(t) || /[ːˈəɪʊɒæʃʒθðŋɔʌɜ:]/.test(t) || /[\]|)]$/.test(t);
+    const isDots = /^(\.{2,}|…)$/.test(t);
+    const thin = !isDots && keep.length && typeof w.ink === 'number' && maxInk > 0 && w.ink < maxInk * 0.62;
+    if (keep.length && (ipaStart || thin)) break;
+    if (!keep.length && /^\d+$/.test(t)) continue; // Zeilennummer am Rand
+    keep.push(t);
+    if (typeof w.ink === 'number' && !isDots) maxInk = Math.max(maxInk, w.ink);
+  }
+  return stripIpa(keep.join(' '));
 }
 
 // Lautschrift hinter dem Wort abschneiden: „to catch, caught [kætʃ; kɔ:t]“ → „to catch, caught“
