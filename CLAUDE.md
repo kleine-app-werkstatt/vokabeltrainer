@@ -5,11 +5,11 @@ Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
 
 ## Stand
 - Live: https://marcelmelter.github.io/vokabeltrainer/ (GitHub Pages, Branch `main`, root)
-- Repo: `marcelmelter/vokabeltrainer` (öffentlich). Bisher manueller Upload über die GitHub-Weboberfläche,
-  weil die GitHub-Verknüpfung im Claude-Firmenkonto nicht freigegeben war.
-- Offen: Update (`app.js`, `sw.js` mit verbesserter Texterkennung) hochladen und mit den Testseiten
-  (`testseite-englisch`, `testseite-franzoesisch`, frei erfunden) auf echten iPhones testen.
-  Erwartet: alle 12 Vokabeln je Seite, ein OCR-Fehler „môgen“ statt „mögen“.
+- Repo: `marcelmelter/vokabeltrainer` (öffentlich). Claude ist direkt verbunden (GitHub-Integration im
+  Claude-Admin aktiviert, Claude GitHub App auf dem Repo installiert) und pusht selbst auf `main`.
+- Offen: Vorlesefunktion auf echten iPhones prüfen (Testknopf mit Diagnose unter „Mein Bereich“);
+  Texterkennung mit den Testseiten (`testseite-englisch`, `testseite-franzoesisch`, frei erfunden) auf echten
+  iPhones testen. Erwartet: alle 12 Vokabeln je Seite, ein OCR-Fehler „môgen“ statt „mögen“.
 
 ## Entscheidungen
 - Kein Server, keine laufende KI-Nutzung, keine Kosten. Alles läuft offline auf dem Gerät (localStorage).

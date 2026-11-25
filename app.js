@@ -265,19 +265,59 @@ function voiceFor(lang) {
   return voices.find((v) => v.lang === want && v.localService) || voices.find((v) => v.lang === want)
     || voices.find((v) => v.lang.startsWith(lang)) || null;
 }
-function speak(text, lang, forceSlow) {
-  if (!('speechSynthesis' in window) || !LANGS[lang]) return;
+let speechHintShown = false;
+function speak(text, lang, forceSlow, onStatus) {
+  if (!('speechSynthesis' in window) || !LANGS[lang]) {
+    if (onStatus) onStatus('unsupported');
+    return;
+  }
+  const synth = window.speechSynthesis;
   const slow = forceSlow || (lastSpoken.text === text && Date.now() - lastSpoken.at < 4000);
   lastSpoken = { text, at: slow ? 0 : Date.now() };
-  speechSynthesis.cancel();
+  // iPhone/Safari: cancel() direkt vor speak() verschluckt die Ansage manchmal –
+  // daher nur abbrechen, wenn wirklich gerade etwas läuft, und kurz warten.
+  const busy = synth.speaking || synth.pending;
+  if (busy) synth.cancel();
   const u = new SpeechSynthesisUtterance(text.replace(/[()]/g, ''));
   u.lang = LANGS[lang].tts;
-  const v = voiceFor(lang);
-  if (v) u.voice = v;
+  let v = null;
+  try { v = voiceFor(lang); if (v) u.voice = v; } catch (e) { v = null; /* Standardstimme der Sprache nutzen */ }
   u.rate = slow ? 0.55 : 0.9;
-  speechSynthesis.speak(u);
+  u.volume = 1;
+  let started = false;
+  u.onstart = () => { started = true; if (onStatus) onStatus('started', v); };
+  u.onerror = (e) => { if (onStatus) onStatus('error:' + (e.error || 'unbekannt'), v); };
+  const go = () => { synth.resume(); synth.speak(u); };
+  if (busy) setTimeout(go, 80); else go();
+  setTimeout(() => {
+    if (started) return;
+    if (onStatus) onStatus('nostart', v);
+    else if (!speechHintShown) { speechHintShown = true; toast('Kein Ton? Stummschalter am iPhone aus und Lautstärke hoch 🔊'); }
+  }, 2500);
 }
-if ('speechSynthesis' in window) speechSynthesis.getVoices();
+if ('speechSynthesis' in window) {
+  speechSynthesis.getVoices();
+  // iPhone: Sprachausgabe beim ersten Fingertipp freischalten (sonst bleibt automatisches Vorlesen stumm)
+  const unlock = () => {
+    try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) { /* egal */ }
+  };
+  document.addEventListener('touchend', unlock, { once: true, passive: true });
+  document.addEventListener('click', unlock, { once: true });
+}
+
+// Testknopf mit Diagnose (Mein Bereich)
+function speechTest(out) {
+  const voices = 'speechSynthesis' in window ? speechSynthesis.getVoices() : [];
+  const en = voices.filter((v) => v.lang.startsWith('en')).length;
+  const fr = voices.filter((v) => v.lang.startsWith('fr')).length;
+  const lines = [`Sprachausgabe vorhanden: ${'speechSynthesis' in window ? 'ja' : 'nein'}`, `Stimmen: ${voices.length} (Englisch ${en}, Französisch ${fr})`];
+  out.textContent = lines.join('\n') + '\nTeste Englisch …';
+  speak('Hello! This is a test.', 'en', false, (st, v) => {
+    const msg = st === 'started' ? '✅ Englisch gestartet' + (v ? ` (${v.name})` : '') : st === 'nostart' ? '❌ Englisch startet nicht' : st === 'unsupported' ? '❌ nicht unterstützt' : `❌ Fehler: ${st.slice(6)}`;
+    lines.push(msg);
+    out.textContent = lines.join('\n') + (st === 'started' ? '\nHörst du nichts? → Stummschalter/Lautstärke prüfen.' : '');
+  });
+}
 const speakBtn = (attrs, small) => `<button type="button" class="speak${small ? ' sm' : ''}" ${attrs} aria-label="Aussprache anhören">🔊</button>`;
 let actx;
 function sound(ok) {
@@ -1284,6 +1324,8 @@ views.me = () => {
       <label class="field">Wörter pro Runde</label>${seg('sessionSize', [[10, '10'], [20, '20'], [30, '30'], [50, '50']])}
       <label class="field">Töne</label>${seg('sound', [['true', '🔊 An'], ['false', '🔇 Aus']])}
       <label class="field">Fremdwort automatisch vorlesen</label>${seg('autoSpeak', [['true', '🗣️ Ja'], ['false', 'Nur per Knopf']])}
+      <button type="button" class="btn teal-soft block" id="ttstest">🔊 Vorlesen testen</button>
+      <div class="report hidden" id="ttsout"></div>
     </div>
     <h2>💾 Sicherung & Handywechsel</h2>
     <div class="card stack">
@@ -1321,6 +1363,7 @@ views.me = () => {
     if (key === 'sound' && st.sound) sound(true);
   })));
   $('#export').onclick = exportData;
+  $('#ttstest').onclick = () => { const o = $('#ttsout'); o.classList.remove('hidden'); speechTest(o); };
   $('#import').onclick = () => $('#impfile').click();
   $('#impfile').onchange = (e) => e.target.files[0] && importFile(e.target.files[0]);
   $('#parent').onclick = () => askPin(() => go('parent'));
