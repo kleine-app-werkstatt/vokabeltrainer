@@ -27,6 +27,8 @@ Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
 - Lernmethode „Auto“: neue Wörter → Kennenlern-Karte → Fremd→DE (Verstehen) → ab Fach 2 DE→Fremd (Schreiben, Rechtschreibung zählt).
   Karteikasten 1/3/7/14/30 Tage, Testtermine verdichten die Wiederholung.
 - Prüfungsmodus (Vokabeltest, Lückentext aus Beispielsätzen) läuft parallel und ändert den Karteikasten nicht.
+- Unregelmäßige Verben (Englisch): fertige Liste (~95, `IRREGULAR_VERBS`) + eigene; abgefragt Simple Past + Past Participle,
+  eigener Karteikasten (`db.verbs`), „be“ verlangt was/were. Past Progressive bewusst nicht (regelmäßig: was/were + -ing).
 - WhatsApp-Bericht per wa.me-Link (Kind tippt auf Senden); Empfänger im Elternbereich mit PIN.
 - Kommerzialisierung vorerst nicht; Hinweise (App-Store-Abo vs. Web-Abo, Arbeitgeber, Datenschutz, Steuern) wurden besprochen.
 
