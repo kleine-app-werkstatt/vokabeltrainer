@@ -1,5 +1,5 @@
 // Offline-Cache. Bei jeder neuen Version VERSION erhöhen.
-const VERSION = 'v7';
+const VERSION = 'v8';
 const CORE = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'fonts/nunito-latin-wght-normal.woff2', 'fonts/nunito-latin-ext-wght-normal.woff2', 'vendor/tesseract/tesseract.min.js'];
 const OCR = ['vendor/tesseract/worker.min.js', 'vendor/tesseract/core/tesseract-core-simd-lstm.wasm.js',

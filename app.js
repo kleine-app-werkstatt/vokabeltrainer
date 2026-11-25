@@ -731,20 +731,25 @@ function linesFromResult(data) {
   return lines;
 }
 
+// Spalten im Buch anhand großer Lücken zwischen Wörtern erkennen
+function columnsOf(words) {
+  const heights = words.map((w) => w.bbox.y1 - w.bbox.y0).sort((a, b) => a - b);
+  const h0 = heights[Math.floor(heights.length / 2)] || 20;
+  const cols = [[words[0]]];
+  for (let i = 1; i < words.length; i++) {
+    if (words[i].bbox.x0 - words[i - 1].bbox.x1 > h0 * 1.2) cols.push([]);
+    cols[cols.length - 1].push(words[i]);
+  }
+  return cols.map((c) => ({ x: c[0].bbox.x0, text: c.map((w) => w.text).join(' ') }));
+}
+
 function splitOcrLine(line) {
   if (line.text) return splitText(line.text);
   const words = line.words;
   const text = words.map((w) => w.text).join(' ');
-  // Spalten im Buch anhand großer Lücken zwischen Wörtern erkennen
   if (words.length >= 2) {
-    const heights = words.map((w) => w.bbox.y1 - w.bbox.y0).sort((a, b) => a - b);
-    const h0 = heights[Math.floor(heights.length / 2)] || 20;
-    const cols = [[words[0]]];
-    for (let i = 1; i < words.length; i++) {
-      if (words[i].bbox.x0 - words[i - 1].bbox.x1 > h0 * 1.2) cols.push([]);
-      cols[cols.length - 1].push(words[i]);
-    }
-    const colText = cols.map((c) => c.map((w) => w.text).join(' '));
+    const colText = columnsOf(words).map((c) => c.text);
+    const cols = colText;
     if (cols.length >= 3) return [colText[0], colText[colText.length - 1], colText.slice(1, -1).join(' ')];
     if (cols.length === 2 && !isPhonetic(colText[1])) return [colText[0], colText[1]];
   }
@@ -753,6 +758,42 @@ function splitOcrLine(line) {
   const parts = text.split(/\s+[-–—=:]\s+|\s*;\s*/).filter((s) => s.trim());
   if (parts.length >= 2) return [parts[0], parts.slice(1).join(', ')];
   return [text, ''];
+}
+
+// Erkannte Zeilen in Vokabel-Zeilen umwandeln. Bricht ein Eintrag im Buch in die
+// nächste Zeile um (z. B. „der Nachbar, die / Nachbarin“), wird der Rest an die
+// passende Spalte der Zeile davor angehängt.
+function buildRows(lines) {
+  const out = [];
+  for (const l of lines) {
+    // Lautschrift-Spalten (z. B. „[ˈklɑːsruːm]“ unter dem Wort) zählen nicht als Inhalt
+    const cols = l.words ? columnsOf(l.words).filter((c) => !isPhonetic(c.text)) : null;
+    if (cols && !cols.length) continue;
+    const prev = out[out.length - 1];
+    if (prev && prev.colX && cols && cols[0].x > prev.colX[0] + (prev.colX[1] - prev.colX[0]) * 0.5) {
+      for (const c of cols) {
+        let best = 0, bd = Infinity;
+        prev.colX.forEach((x, i) => { const d = Math.abs(x - c.x); if (d < bd) { bd = d; best = i; } });
+        if (best === prev.colX.length - 1) prev.g = `${prev.g} ${c.text}`;
+        else if (best > 0) prev.mid = `${prev.mid} ${c.text}`.trim();
+      }
+      continue;
+    }
+    const [f, g, mid] = splitOcrLine(l);
+    out.push({ f, g, mid: mid || '', colX: cols && cols.length >= 2 ? cols.map((c) => c.x) : null });
+  }
+  return out
+    .map((r) => [cleanSide(r.f), cleanSide(r.g), exampleFrom(r.mid, r.f)])
+    .filter(([a, b]) => (a + b).replace(/[^\p{L}]/gu, '').length >= 2);
+}
+
+// Überschriften, Seitenzahlen o. Ä. nicht vorab anhaken
+function looksLikeJunk(f, g) {
+  if (!f || !g) return true;
+  if (/^[\d\s.,:;·\-–]+$/.test(g) || /^[\d\s.,:;·\-–]+$/.test(f)) return true;
+  if (/^(unit|unité|station|volet|lesson|leçon|chapter|chapitre|module|part|teil|seite|page|words|vocabulaire|wortschatz|vokabeln)\b/i.test(f)) return true;
+  if (f.split(/\s+/).length > 6 || g.split(/\s+/).length > 8) return true;
+  return false;
 }
 
 views.scan = async () => {
@@ -790,11 +831,7 @@ views.scan = async () => {
     const worker = await getWorker([LANGS[ch.lang].ocr, 'deu']);
     const { data } = await worker.recognize(canvas, {}, { text: true, blocks: true });
     if (cancelled) return;
-    const rows = linesFromResult(data)
-      .filter((l) => l.text || l.conf > 35)
-      .map(splitOcrLine)
-      .map(([a, b, ex]) => [cleanSide(a), cleanSide(b), exampleFrom(ex, a)])
-      .filter(([a, b]) => (a + b).replace(/[^\p{L}]/gu, '').length >= 2);
+    const rows = buildRows(linesFromResult(data).filter((l) => l.text || l.conf > 35));
     URL.revokeObjectURL(preview);
     if (!rows.length) {
       toast('Keine Wörter gefunden – probier es mit mehr Licht nochmal');
@@ -816,7 +853,7 @@ views.review = () => {
   const ch = chapter(state.id);
   if (!ch) return go('home');
   const L = LANGS[ch.lang];
-  const rows = state.rows.map((r) => (Array.isArray(r) ? { f: r[0], g: r[1], ex: r[2] || '', on: !!(r[0] && r[1]) } : r));
+  const rows = state.rows.map((r) => (Array.isArray(r) ? { f: r[0], g: r[1], ex: r[2] || '', on: !looksLikeJunk(r[0], r[1]) } : r));
   const pages = state.pages || [];
   const pageUrls = pages.map((b) => URL.createObjectURL(b));
   const count = () => rows.filter((r) => r.on && r.f.trim() && r.g.trim()).length;
