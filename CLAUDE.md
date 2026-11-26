@@ -31,7 +31,7 @@ Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
   eigener Karteikasten (`db.verbs`), „be“ verlangt was/were. Past Progressive bewusst nicht (regelmäßig: was/were + -ing).
 - Anonymer Zähler „erster Start“ (GoatCounter, Bild-Pixel beim Abschluss des Einrichtens; bewusst KEIN Merker auf
   dem Gerät, damit keine Einwilligung nach TDDDG nötig ist) ist vorbereitet, aber AUS:
-  `COUNTER_CODE` in app.js leer. Einschalten erst ab Etappe 2 nach Anlegen eines GoatCounter-Kontos durch den Nutzer.
+  `COUNTER_CODE` = kleine-app-werkstatt (Konto kleine-app-werkstatt.goatcounter.com angelegt), zuerst nur in test/ aktiv.
   `IMPRINT` (Impressum) ebenfalls leer; Abschnitt „Datenschutz & Impressum“ unter Mein Bereich.
 - WhatsApp-Bericht per wa.me-Link (Kind tippt auf Senden); Empfänger im Elternbereich mit PIN.
 - Kommerzialisierung vorerst nicht; Hinweise (App-Store-Abo vs. Web-Abo, Arbeitgeber, Datenschutz, Steuern) wurden besprochen.

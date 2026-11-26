@@ -9,7 +9,7 @@
 
 // Anonymer Zähler für den ersten Start (GoatCounter). Leer = ausgeschaltet.
 // Zum Einschalten die GoatCounter-Kennung eintragen, z. B. 'kleine-app-werkstatt' (→ kleine-app-werkstatt.goatcounter.com).
-const COUNTER_CODE = '';
+const COUNTER_CODE = 'kleine-app-werkstatt';
 // Impressum: erst ausfüllen, wenn die App über die Familie hinaus geteilt wird. null = nicht anzeigen.
 // Beispiel: { name: 'Vorname Nachname', address: 'Straße Nr., PLZ Ort', email: 'kontakt@…' }
 const IMPRINT = null;
@@ -17,7 +17,7 @@ const IMPRINT = null;
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
-const APP_VERSION = '26.11.2026 c'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
+const APP_VERSION = '26.11.2026 d'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
