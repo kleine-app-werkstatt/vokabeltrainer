@@ -10,7 +10,7 @@
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
-const APP_VERSION = '25.11.2026 e'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
+const APP_VERSION = '25.11.2026 f'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
@@ -35,6 +35,8 @@ function emptyDb() {
     parent: { pin: '', recipients: [] },
     lastBackup: 0,
     badges: {},
+    verbs: {},
+    ownVerbs: [],
     stats: { scans: 0, perfect: 0 },
   };
 }
@@ -47,6 +49,8 @@ function migrate(d) {
   out.parent = Object.assign(emptyDb().parent, d.parent || {});
   out.stats = Object.assign(emptyDb().stats, d.stats || {});
   out.badges = d.badges || {};
+  out.verbs = d.verbs || {};
+  out.ownVerbs = d.ownVerbs || [];
   out.chapters.forEach((c) => { if (c.testDate === undefined) c.testDate = ''; if (c.archived === undefined) c.archived = false; });
   if ((d.version || 1) < 3 && out.settings.direction === 'mixed') out.settings.direction = 'auto';
   out.version = 3;
@@ -508,6 +512,7 @@ views.home = () => {
       const list = active.filter((c) => c.lang === l);
       return list.length ? `<h2>${LANGS[l].flag} ${LANGS[l].name}</h2><div class="tiles">${list.map(tile).join('')}</div>` : '';
     }).join('') : ''}
+    ${verbTile()}
     ${db.cards.length || db.chapters.length ? `<button class="btn block" style="margin-top:22px" id="new-ch">+ Neues Kapitel</button>` : ''}
     ${archived.length ? `<details class="archive" style="margin-top:14px"><summary>📦 Abgeschlossene Kapitel (${archived.length}) ›</summary><div class="tiles">${archived.map(tile).join('')}</div>
       <p class="muted tiny" style="margin-top:8px">Die Wörter daraus kommen trotzdem ab und zu zur Wiederholung dran.</p></details>` : ''}
@@ -517,6 +522,8 @@ views.home = () => {
   $$('[data-ch]').forEach((b) => (b.onclick = () => go('chapter', { id: b.dataset.ch })));
   const ld = $('#learn-due');
   if (ld) ld.onclick = () => startSession(pickDue(db.cards), 'Fällige Vokabeln');
+  const vt = $('#verbs-tile');
+  if (vt) vt.onclick = () => go('verbs');
   const lp = $('#learn-problems');
   if (lp) lp.onclick = () => startSession(shuffle(problems).slice(0, db.settings.sessionSize), 'Schwierige Wörter', true);
   const qb = $('#quick-backup');
@@ -1680,6 +1687,7 @@ const BADGES = [
   { id: 'sure100', icon: '💎', name: 'Gedächtnis-Ass', hint: '100 Wörter sitzen sicher', test: (s) => s.sure >= 100 },
   { id: 'perfect', icon: '💯', name: 'Fehlerfrei', hint: 'Eine Runde mit mind. 10 Wörtern ohne Fehler', test: (s) => s.perfect >= 1 },
   { id: 'exam1', icon: '🎓', name: 'Prüfungsstar', hint: 'Eine Prüfung mit Note 1', test: (s) => s.examOne },
+  { id: 'verbs20', icon: '🔤', name: 'Verb-Profi', hint: '20 unregelmäßige Verben sitzen sicher', test: (s) => s.verbsSure >= 20 },
 ];
 function checkBadges() {
   const goal = db.settings.dailyGoal || 20;
@@ -1691,6 +1699,7 @@ function checkBadges() {
     streak: bestStreak(),
     cards: db.cards.length,
     sure: db.cards.filter((c) => c.box >= 4).length,
+    verbsSure: Object.values(db.verbs || {}).filter((v) => v.on && v.box >= 4).length,
     examOne: db.chapters.some((c) => (c.exams || []).some((e) => gradeFor(e.score / e.total) === 1)),
   };
   const fresh = BADGES.filter((b) => !db.badges[b.id] && b.test(st));
@@ -1798,6 +1807,7 @@ function buildReport(k) {
       L.push(`• ${LANGS[c.lang].flag} ${c.name} (${list.length}): ${words}${list.length > 12 ? ` … +${list.length - 12}` : ''}`);
     });
   }
+  if (d.verbs && d.verbs.r + d.verbs.w) { L.push(''); L.push(`🔤 Unregelmäßige Verben: ${d.verbs.r} ✓ / ${d.verbs.w} ✗`); }
   if ((d.exams || []).length) {
     L.push('');
     L.push('🎓 Prüfungen:');
@@ -2345,6 +2355,329 @@ async function importFile(file) {
   } catch (e) {
     toast('Diese Datei ist keine gültige Sicherung');
   }
+}
+
+/* ---------- Unregelmäßige Verben (Englisch) ----------
+   Fertige Liste gängiger Verben (Klassen 5–8, Allgemeinwissen) + eigene Ergänzungen.
+   Abgefragt werden Simple Past und Past Participle; Grundform und Deutsch sind vorgegeben.
+   Mehrere richtige Formen mit „/“ (learnt/learned); bei „be“ müssen beide Formen (was/were) genannt werden. */
+const IRREGULAR_VERBS = [
+  ['be', 'was/were', 'been', 'sein'],
+  ['become', 'became', 'become', 'werden'],
+  ['begin', 'began', 'begun', 'beginnen, anfangen'],
+  ['bite', 'bit', 'bitten', 'beißen'],
+  ['blow', 'blew', 'blown', 'blasen, wehen'],
+  ['break', 'broke', 'broken', 'brechen, kaputt machen'],
+  ['bring', 'brought', 'brought', 'bringen, mitbringen'],
+  ['build', 'built', 'built', 'bauen'],
+  ['burn', 'burnt/burned', 'burnt/burned', 'brennen, verbrennen'],
+  ['buy', 'bought', 'bought', 'kaufen'],
+  ['catch', 'caught', 'caught', 'fangen'],
+  ['choose', 'chose', 'chosen', 'wählen, aussuchen'],
+  ['come', 'came', 'come', 'kommen'],
+  ['cost', 'cost', 'cost', 'kosten'],
+  ['cut', 'cut', 'cut', 'schneiden'],
+  ['dig', 'dug', 'dug', 'graben'],
+  ['do', 'did', 'done', 'tun, machen'],
+  ['draw', 'drew', 'drawn', 'zeichnen'],
+  ['dream', 'dreamt/dreamed', 'dreamt/dreamed', 'träumen'],
+  ['drink', 'drank', 'drunk', 'trinken'],
+  ['drive', 'drove', 'driven', 'fahren'],
+  ['eat', 'ate', 'eaten', 'essen'],
+  ['fall', 'fell', 'fallen', 'fallen'],
+  ['feed', 'fed', 'fed', 'füttern'],
+  ['feel', 'felt', 'felt', 'fühlen, sich fühlen'],
+  ['fight', 'fought', 'fought', 'kämpfen'],
+  ['find', 'found', 'found', 'finden'],
+  ['fly', 'flew', 'flown', 'fliegen'],
+  ['forget', 'forgot', 'forgotten', 'vergessen'],
+  ['freeze', 'froze', 'frozen', 'frieren, gefrieren'],
+  ['get', 'got', 'got', 'bekommen, holen, werden'],
+  ['give', 'gave', 'given', 'geben'],
+  ['go', 'went', 'gone', 'gehen, fahren'],
+  ['grow', 'grew', 'grown', 'wachsen'],
+  ['hang', 'hung', 'hung', 'hängen'],
+  ['have', 'had', 'had', 'haben'],
+  ['hear', 'heard', 'heard', 'hören'],
+  ['hide', 'hid', 'hidden', 'verstecken'],
+  ['hit', 'hit', 'hit', 'schlagen, treffen'],
+  ['hold', 'held', 'held', 'halten'],
+  ['hurt', 'hurt', 'hurt', 'verletzen, wehtun'],
+  ['keep', 'kept', 'kept', 'behalten'],
+  ['know', 'knew', 'known', 'wissen, kennen'],
+  ['lay', 'laid', 'laid', 'legen'],
+  ['lead', 'led', 'led', 'führen'],
+  ['learn', 'learnt/learned', 'learnt/learned', 'lernen'],
+  ['leave', 'left', 'left', 'verlassen, weggehen'],
+  ['lend', 'lent', 'lent', 'leihen, verleihen'],
+  ['let', 'let', 'let', 'lassen'],
+  ['lie', 'lay', 'lain', 'liegen'],
+  ['light', 'lit', 'lit', 'anzünden'],
+  ['lose', 'lost', 'lost', 'verlieren'],
+  ['make', 'made', 'made', 'machen, herstellen'],
+  ['mean', 'meant', 'meant', 'bedeuten, meinen'],
+  ['meet', 'met', 'met', 'treffen, kennenlernen'],
+  ['pay', 'paid', 'paid', 'bezahlen'],
+  ['put', 'put', 'put', 'legen, stellen'],
+  ['read', 'read', 'read', 'lesen'],
+  ['ride', 'rode', 'ridden', 'reiten, fahren (Rad)'],
+  ['ring', 'rang', 'rung', 'klingeln, anrufen'],
+  ['rise', 'rose', 'risen', 'steigen, aufgehen'],
+  ['run', 'ran', 'run', 'rennen, laufen'],
+  ['say', 'said', 'said', 'sagen'],
+  ['see', 'saw', 'seen', 'sehen'],
+  ['sell', 'sold', 'sold', 'verkaufen'],
+  ['send', 'sent', 'sent', 'schicken, senden'],
+  ['set', 'set', 'set', 'setzen, stellen'],
+  ['shake', 'shook', 'shaken', 'schütteln'],
+  ['shine', 'shone', 'shone', 'scheinen'],
+  ['shoot', 'shot', 'shot', 'schießen'],
+  ['show', 'showed', 'shown', 'zeigen'],
+  ['shut', 'shut', 'shut', 'schließen'],
+  ['sing', 'sang', 'sung', 'singen'],
+  ['sink', 'sank', 'sunk', 'sinken'],
+  ['sit', 'sat', 'sat', 'sitzen'],
+  ['sleep', 'slept', 'slept', 'schlafen'],
+  ['smell', 'smelt/smelled', 'smelt/smelled', 'riechen'],
+  ['speak', 'spoke', 'spoken', 'sprechen'],
+  ['spell', 'spelt/spelled', 'spelt/spelled', 'buchstabieren'],
+  ['spend', 'spent', 'spent', 'ausgeben, verbringen'],
+  ['stand', 'stood', 'stood', 'stehen'],
+  ['steal', 'stole', 'stolen', 'stehlen'],
+  ['stick', 'stuck', 'stuck', 'kleben, stecken'],
+  ['swim', 'swam', 'swum', 'schwimmen'],
+  ['take', 'took', 'taken', 'nehmen, bringen'],
+  ['teach', 'taught', 'taught', 'unterrichten, beibringen'],
+  ['tear', 'tore', 'torn', 'zerreißen'],
+  ['tell', 'told', 'told', 'erzählen, sagen'],
+  ['think', 'thought', 'thought', 'denken, glauben'],
+  ['throw', 'threw', 'thrown', 'werfen'],
+  ['understand', 'understood', 'understood', 'verstehen'],
+  ['wake', 'woke', 'woken', 'aufwachen, wecken'],
+  ['wear', 'wore', 'worn', 'tragen (Kleidung)'],
+  ['win', 'won', 'won', 'gewinnen'],
+  ['write', 'wrote', 'written', 'schreiben'],
+];
+
+function allVerbs() {
+  const own = (db.ownVerbs || []).map((v) => ({ ...v, own: true }));
+  const ownInf = new Set(own.map((v) => v.inf));
+  return [...IRREGULAR_VERBS.filter(([inf]) => !ownInf.has(inf)).map(([inf, past, pp, de]) => ({ inf, past, pp, de, own: false })), ...own]
+    .sort((a, b) => a.inf.localeCompare(b.inf));
+}
+function verbState(inf) {
+  db.verbs = db.verbs || {};
+  return db.verbs[inf] || (db.verbs[inf] = { on: false, box: 0, due: 0, right: 0, wrong: 0 });
+}
+const activeVerbs = () => allVerbs().filter((v) => verbState(v.inf).on);
+const verbDue = (v) => verbState(v.inf).due <= Date.now();
+
+// Antwort prüfen: bei mehreren Formen genügt eine; bei „be“ müssen „was“ und „were“ beide genannt sein
+function checkVerbForm(given, correct, inf) {
+  const opts = correct.toLowerCase().split('/').map((s) => s.trim());
+  const parts = given.toLowerCase().replace(/[.!]/g, ' ').split(/\s*(?:\/|,|;|\bor\b|\band\b|\boder\b|\bund\b)\s*|\s+/).map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return false;
+  if (!parts.every((p) => opts.includes(p))) return false;
+  return inf === 'be' ? opts.every((o) => parts.includes(o)) : true;
+}
+
+function gradeVerb(v, correct, wrongBefore) {
+  const st = verbState(v.inf), today = startOfDay(), d = dayRec();
+  d.verbs = d.verbs || { r: 0, w: 0 };
+  if (correct) {
+    if (wrongBefore) { st.box = 1; st.due = today + DAY; }
+    else {
+      st.right++; d.right++; d.verbs.r++;
+      if (st.due <= Date.now() || st.box === 0) { st.box = Math.min(st.box + 1, 5); st.due = today + INTERVALS[st.box] * DAY; }
+    }
+  } else if (!wrongBefore) {
+    st.wrong++; d.wrong++; d.verbs.w++;
+    st.box = 1; st.due = Date.now();
+  }
+  st.seen = Date.now();
+  save();
+}
+
+views.verbs = () => {
+  const all = allVerbs();
+  const act = all.filter((v) => verbState(v.inf).on);
+  const due = act.filter(verbDue);
+  const sure = act.filter((v) => verbState(v.inf).box >= 4).length;
+  app.innerHTML = `
+    <div class="topbar"><button class="iconbtn" id="back">‹</button><h1>🔤 Unregelmäßige Verben</h1></div>
+    <div class="card">
+      <div class="row spread"><strong>${act.length} von ${all.length} ausgewählt</strong><span class="muted small">${sure} sitzen sicher</span></div>
+      ${distBar(act.map((v) => verbState(v.inf)))}${legend()}
+      <div class="stack" style="margin-top:16px">
+        <button class="btn primary big block" id="v-due" ${due.length ? '' : 'disabled'}>${due.length ? `${due.length} fällige üben 🚀` : act.length ? 'Gerade nichts fällig ✓' : 'Wähle zuerst unten Verben aus'}</button>
+        <button class="btn teal-soft block" id="v-all" ${act.length ? '' : 'disabled'}>Alle ausgewählten üben</button>
+      </div>
+    </div>
+    <h2>Welche Verben hattet ihr schon?</h2>
+    <p class="muted small">Hake die Verben an, die ihr in der Schule schon gelernt habt. Nur angehakte werden abgefragt.</p>
+    <div class="row wrap" style="margin-bottom:10px"><button class="btn" id="v-allon" style="min-height:44px">Alle anhaken</button><button class="btn" id="v-alloff" style="min-height:44px">Keine</button><button class="btn teal-soft" id="v-add" style="min-height:44px">+ Eigenes Verb</button></div>
+    <input type="search" id="v-filter" placeholder="🔍 Verb suchen …" style="margin-bottom:12px">
+    <div class="list" id="vlist">${all.map((v) => { const st = verbState(v.inf); return `
+      <label class="vocab" data-q="${esc((v.inf + ' ' + v.past + ' ' + v.pp + ' ' + v.de).toLowerCase())}" style="cursor:pointer">
+        <input type="checkbox" data-verb="${esc(v.inf)}" ${st.on ? 'checked' : ''} style="width:24px;height:24px;accent-color:var(--primary);flex:none">
+        <div class="grow"><div class="f">${esc(v.inf)} – ${esc(v.past)} – ${esc(v.pp)}</div><div class="g">${esc(v.de)}${v.own ? ' · eigenes' : ''}</div></div>
+        ${st.on ? `<i class="box-dot" style="background:var(--b${st.box})" title="${BOX_NAMES[st.box]}"></i>` : ''}
+        ${v.own ? `<button type="button" class="iconbtn" data-delverb="${esc(v.inf)}" aria-label="Eigenes Verb löschen" style="min-width:40px;min-height:40px;box-shadow:none">🗑️</button>` : ''}
+      </label>`; }).join('')}</div>`;
+  $('#back').onclick = () => go('home');
+  $('#v-due').onclick = () => startVerbSession(shuffle(due).slice(0, db.settings.sessionSize));
+  $('#v-all').onclick = () => startVerbSession(shuffle(act).slice(0, Math.max(db.settings.sessionSize, 10)));
+  $$('[data-verb]').forEach((cb) => (cb.onchange = () => { verbState(cb.dataset.verb).on = cb.checked; save(); }));
+  const setAll = (on) => { all.forEach((v) => { verbState(v.inf).on = on; }); save(); render(); };
+  $('#v-allon').onclick = () => setAll(true);
+  $('#v-alloff').onclick = () => setAll(false);
+  $('#v-add').onclick = addOwnVerb;
+  $$('[data-delverb]').forEach((b) => (b.onclick = async (e) => {
+    e.preventDefault();
+    if (!(await confirmDlg('Eigenes Verb löschen?', `„${b.dataset.delverb}“ wird entfernt.`))) return;
+    db.ownVerbs = (db.ownVerbs || []).filter((v) => v.inf !== b.dataset.delverb);
+    delete db.verbs[b.dataset.delverb];
+    save();
+    render();
+  }));
+  const f = $('#v-filter');
+  f.oninput = () => { const q = f.value.toLowerCase().trim(); $$('#vlist .vocab').forEach((el) => el.classList.toggle('hidden', q && !el.dataset.q.includes(q))); };
+};
+
+async function addOwnVerb() {
+  const r = await dialog(`<h3>Eigenes Verb</h3>
+    <label class="field" for="nv-inf">Grundform</label><input type="text" id="nv-inf" placeholder="z. B. swing" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label class="field" style="margin-top:10px" for="nv-past">Simple Past</label><input type="text" id="nv-past" placeholder="z. B. swung" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label class="field" style="margin-top:10px" for="nv-pp">Past Participle</label><input type="text" id="nv-pp" placeholder="z. B. swung" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label class="field" style="margin-top:10px" for="nv-de">Deutsch</label><input type="text" id="nv-de" placeholder="z. B. schwingen" autocomplete="off">
+    <p class="muted tiny" style="margin-top:6px">Zwei richtige Formen mit „/“ trennen, z. B. learnt/learned.</p>
+    <div class="actions"><button class="btn ghost" value="cancel">Abbrechen</button><button class="btn primary" value="ok">Hinzufügen</button></div>`,
+  (form) => { if (['nv-inf', 'nv-past', 'nv-pp', 'nv-de'].some((id) => !$('#' + id, form).value.trim())) { toast('Bitte alle vier Felder ausfüllen'); return false; } });
+  if (r !== 'ok') return;
+  const v = { inf: $('#nv-inf').value.trim().toLowerCase().replace(/^to /, ''), past: $('#nv-past').value.trim().toLowerCase(), pp: $('#nv-pp').value.trim().toLowerCase(), de: $('#nv-de').value.trim() };
+  db.ownVerbs = (db.ownVerbs || []).filter((x) => x.inf !== v.inf).concat([v]);
+  verbState(v.inf).on = true;
+  save();
+  toast('Verb hinzugefügt ✓');
+  render();
+}
+
+let vsession = null;
+function startVerbSession(list) {
+  if (!list.length) return toast('Keine Verben zum Üben');
+  vsession = { queue: list.map((v) => v.inf), total: list.length, done: 0, wrongIds: new Set(), introduced: new Set(), firstTryRight: 0, last: Date.now() };
+  dayRec().sessions++;
+  save();
+  go('verbLearn');
+}
+
+views.verbLearn = () => {
+  if (!vsession) return go('verbs');
+  if (!vsession.queue.length) return go('verbSummary');
+  const v = allVerbs().find((x) => x.inf === vsession.queue[0]);
+  if (!v) { vsession.queue.shift(); vsession.total--; return render(); }
+  const st = verbState(v.inf);
+  const pct = (vsession.done / vsession.total) * 100;
+  const forms = `${v.inf} – ${v.past} – ${v.pp}`;
+  const sayForms = () => speak(`${v.inf}, ${v.past.replace('/', ' or ')}, ${v.pp.replace('/', ' or ')}`, 'en');
+  const top = `<div class="topbar"><button class="iconbtn" id="quit" aria-label="Beenden">✕</button><div class="progress"><div style="width:${pct}%"></div></div><span class="small" style="font-weight:900">${vsession.done}/${vsession.total}</span></div>`;
+  const quit = () => { $('#quit').onclick = () => { vsession = null; go('verbs'); }; };
+
+  // Neues Verb: erst kennenlernen
+  if (st.box === 0 && !vsession.introduced.has(v.inf) && !vsession.wrongIds.has(v.inf)) {
+    app.innerHTML = `${top}
+      <div class="card quiz">
+        <span class="dir en">✨ Neues Verb</span>
+        <div class="muted small" style="margin-top:12px">${esc(v.de)}</div>
+        <div class="word">${esc(forms)}</div>
+        ${speakBtn('id="say"')}
+        <div class="banner yellow" style="text-align:left"><span class="ico">🗣️</span><div class="small">Sprich die drei Formen zweimal laut nach: <strong>${esc(forms)}</strong></div></div>
+        <button class="btn primary big block" id="gotit" style="margin-top:16px">Hab's mir gemerkt ›</button>
+      </div>`;
+    quit();
+    $('#say').onclick = sayForms;
+    setTimeout(sayForms, 300);
+    $('#gotit').onclick = () => { vsession.introduced.add(v.inf); vsession.queue.shift(); vsession.queue.splice(Math.min(2, vsession.queue.length), 0, v.inf); render(); };
+    return;
+  }
+
+  app.innerHTML = `${top}
+    <div class="card quiz" id="qcard">
+      <span class="dir en">🔤 Unregelmäßiges Verb</span>
+      <div class="muted small" style="margin-top:10px">${esc(v.de)}${vsession.wrongIds.has(v.inf) ? ' · Nochmal probieren 💪' : ''}</div>
+      <div class="word">${esc(v.inf)}</div>
+      <form id="vform" style="text-align:left">
+        <label class="field" for="vpast">Simple Past</label>
+        <input type="text" id="vpast" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="next">
+        <label class="field" for="vpp" style="margin-top:10px">Past Participle</label>
+        <input type="text" id="vpp" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
+        <div class="grid2" style="margin-top:14px"><button type="button" class="btn" id="vdunno">🤷 Weiß nicht</button><button class="btn primary">Prüfen ✓</button></div>
+      </form>
+      <div id="varea"></div>
+    </div>`;
+  quit();
+  const ip = $('#vpast'), ipp = $('#vpp');
+  setTimeout(() => ip.focus(), 60);
+  ip.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); ipp.focus(); } };
+  const show = (gp, gpp) => {
+    const okP = checkVerbForm(gp, v.past, v.inf), okPP = checkVerbForm(gpp, v.pp, v.inf);
+    const correct = okP && okPP;
+    sound(correct);
+    if (!correct) $('#qcard').classList.add('shake');
+    $('#vform').remove();
+    const line = (label, given, sol, ok) => `<div style="margin-top:6px;color:var(--text)">${ok ? '✅' : '❌'} <b>${label}:</b> ${esc(sol)}${!ok && given ? ` <span class="muted small">(du: ${esc(given)})</span>` : ''}</div>`;
+    $('#varea').innerHTML = `
+      <div class="result ${correct ? 'ok' : 'bad'}" style="text-align:left"><strong>${correct ? pick(PRAISE) : given(gp, gpp) ? 'Nicht ganz.' : 'So heißt es:'}</strong>
+        ${line('Simple Past', gp, v.past, okP)}${line('Past Participle', gpp, v.pp, okPP)}
+        <div class="row" style="margin-top:10px;color:var(--text)">${speakBtn('id="say2"', true)}<span class="small"><strong>${esc(forms)}</strong></span></div>
+        ${v.inf === 'be' && !correct ? '<div class="small muted" style="margin-top:6px">Tipp: Bei „be“ gehören beide Formen dazu: was/were.</div>' : ''}
+      </div>
+      <button class="btn ${correct ? 'ok' : 'primary'} big block" id="vnext" style="margin-top:16px">Weiter ›</button>`;
+    $('#say2').onclick = sayForms;
+    if (!correct) sayForms();
+    $('#vnext').focus();
+    $('#vnext').onclick = () => {
+      const now = Date.now();
+      dayRec().secs += Math.min((now - vsession.last) / 1000, 90);
+      vsession.last = now;
+      const wrongBefore = vsession.wrongIds.has(v.inf);
+      gradeVerb(v, correct, wrongBefore);
+      vsession.queue.shift();
+      if (correct) { vsession.done++; if (!wrongBefore) vsession.firstTryRight++; }
+      else { vsession.wrongIds.add(v.inf); vsession.queue.splice(Math.min(3, vsession.queue.length), 0, v.inf); }
+      render();
+    };
+  };
+  const given = (a, b) => (a || '').trim() || (b || '').trim();
+  $('#vform').onsubmit = (e) => { e.preventDefault(); if (!ip.value.trim()) return ip.focus(); if (!ipp.value.trim()) return ipp.focus(); show(ip.value.trim(), ipp.value.trim()); };
+  $('#vdunno').onclick = () => show('', '');
+};
+
+views.verbSummary = () => {
+  const s = vsession;
+  if (!s) return go('verbs');
+  const pct = Math.round((s.firstTryRight / s.total) * 100);
+  const wrong = [...s.wrongIds].map((inf) => allVerbs().find((v) => v.inf === inf)).filter(Boolean);
+  const fresh = s.fresh || (s.fresh = checkBadges());
+  app.innerHTML = `
+    <div class="hero ${pct >= 80 ? 'done' : ''} center">
+      <div style="font-size:60px;position:relative;z-index:1">${pct === 100 ? '🏆' : pct >= 80 ? '🎉' : '💪'}</div>
+      <div class="num" style="position:relative;z-index:1">${pct} %</div>
+      <div class="lbl" style="position:relative;z-index:1">${s.firstTryRight} von ${s.total} Verben auf Anhieb</div>
+      <div style="text-align:left">${goalRing()}</div>
+    </div>
+    ${badgeBanner(fresh)}
+    ${wrong.length ? `<h2>Diese Verben üben wir morgen nochmal</h2><div class="list">${wrong.map((v) => `<div class="vocab"><i class="box-dot" style="background:var(--b1)"></i><div class="grow"><div class="f">${esc(v.inf)} – ${esc(v.past)} – ${esc(v.pp)}</div><div class="g">${esc(v.de)}</div></div></div>`).join('')}</div>` : ''}
+    <button class="btn primary big block" style="margin-top:20px" id="vdone">Fertig</button>`;
+  if (pct >= 80 || fresh.length) confetti();
+  $('#vdone').onclick = () => { vsession = null; go('verbs'); };
+};
+
+function verbTile() {
+  const act = activeVerbs(), due = act.filter(verbDue).length;
+  return `<h2>🔤 Extra</h2><div class="tiles"><button class="tile en" id="verbs-tile"><span class="flag">🔤</span>
+    <div class="grow"><div class="row"><span class="title grow">Unregelmäßige Verben</span>${due ? `<span class="badge">${due}</span>` : ''}</div>
+    <div class="muted small">${act.length ? `${act.length} ausgewählt · ${act.filter((v) => verbState(v.inf).box >= 4).length} sicher` : 'go – went – gone · Englisch'}</div></div><span class="chev">›</span></button></div>`;
 }
 
 /* ---------- Start ---------- */
