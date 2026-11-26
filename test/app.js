@@ -7,10 +7,17 @@
    angepasst an eingetragene Testtermine.
    ========================================================= */
 
+// Anonymer Zähler für den ersten Start (GoatCounter). Leer = ausgeschaltet.
+// Zum Einschalten die GoatCounter-Kennung eintragen, z. B. 'kleine-app-werkstatt' (→ kleine-app-werkstatt.goatcounter.com).
+const COUNTER_CODE = '';
+// Impressum: erst ausfüllen, wenn die App über die Familie hinaus geteilt wird. null = nicht anzeigen.
+// Beispiel: { name: 'Vorname Nachname', address: 'Straße Nr., PLZ Ort', email: 'kontakt@…' }
+const IMPRINT = null;
+
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
-const APP_VERSION = '26.11.2026 a'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
+const APP_VERSION = '26.11.2026 b'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
@@ -427,6 +434,7 @@ views.onboarding = () => {
     if (!n) { $('#pname').focus(); return toast('Bitte gib deinen Namen ein'); }
     db.profile = { name: n, avatar };
     save();
+    countFirstStart();
     go('home');
   };
   $('#restore').onclick = () => $('#impfile').click();
@@ -1907,6 +1915,7 @@ views.me = () => {
     </div>
     <h2>👨‍👩‍👧 Für Eltern</h2>
     <div class="card"><p class="small muted">WhatsApp-Bericht einrichten (mit PIN geschützt).</p><button class="btn purple-soft block" id="parent">🔒 Elternbereich</button></div>
+    ${privacySection()}
     <h2>💡 So lernst du mit der App</h2>
     <div class="card small">
       <p><strong>1. Kennenlernen:</strong> Ein neues Wort siehst du zuerst mit Übersetzung und Aussprache. Sprich es laut nach – das hilft beim Merken.</p>
@@ -2695,6 +2704,36 @@ async function forceUpdate() {
     await Promise.all(keys.filter((k) => k.startsWith(scope) && !k.slice(scope.length).includes('/')).map((k) => caches.delete(k)));
   } catch (e) { /* trotzdem neu laden */ }
   setTimeout(() => location.reload(), 400);
+}
+
+// Einmalig beim ersten Einrichten: ein anonymes Signal „App wurde eingerichtet“ (keine Namen, keine Inhalte, keine Cookies)
+function countFirstStart() {
+  if (!COUNTER_CODE) return;
+  const flag = STORE_KEY + '.counted';
+  try { if (localStorage.getItem(flag)) return; localStorage.setItem(flag, '1'); } catch (e) { return; }
+  const img = new Image();
+  img.referrerPolicy = 'no-referrer';
+  img.src = `https://${COUNTER_CODE}.goatcounter.com/count?p=${encodeURIComponent(IS_TEST ? '/erster-start-test' : '/erster-start')}&r=${Math.random().toString(36).slice(2)}`;
+}
+
+function privacySection() {
+  return `<h2>ℹ️ Datenschutz & Impressum</h2>
+    <div class="card small">
+      <details><summary style="font-weight:800;cursor:pointer">Was passiert mit meinen Daten?</summary>
+        <ul style="padding-left:20px;margin:10px 0 0">
+          <li><strong>Alles bleibt auf diesem Gerät:</strong> Vokabeln, Lernstand, Name und Einstellungen. Es gibt kein Konto und keinen Server.</li>
+          <li><strong>Fotos</strong> werden nur auf dem Gerät gelesen und nach dem Speichern sofort verworfen.</li>
+          <li><strong>Vorlesen</strong> nutzt die Sprachausgabe des Geräts.</li>
+          <li><strong>Bereitstellung:</strong> Die App wird über GitHub Pages (GitHub Inc.) geladen. Dabei verarbeitet GitHub technisch notwendige Daten wie die IP-Adresse – wie bei jeder Webseite.</li>
+          <li><strong>WhatsApp-Bericht, Sicherung, Kapitel teilen:</strong> nur, wenn du selbst tippst – dann an WhatsApp bzw. dorthin, wo du die Datei ablegst.</li>
+          ${COUNTER_CODE ? `<li><strong>Zähler:</strong> Beim allerersten Einrichten sendet die App einmalig ein anonymes Signal an GoatCounter, um zu zählen, wie oft sie eingerichtet wurde. Ohne Namen, ohne Inhalte, ohne Cookies.</li>` : ''}
+          <li>Keine Werbung, keine Analyse-Werkzeuge, keine KI-Dienste.</li>
+        </ul>
+      </details>
+      ${IMPRINT ? `<details style="margin-top:10px"><summary style="font-weight:800;cursor:pointer">Impressum</summary>
+        <p style="margin:10px 0 0">${esc(IMPRINT.name)}<br>${esc(IMPRINT.address)}${IMPRINT.email ? `<br>${esc(IMPRINT.email)}` : ''}</p>
+        <p class="muted tiny">Privates, nicht-kommerzielles Projekt.</p></details>` : ''}
+    </div>`;
 }
 
 /* ---------- Start ---------- */
