@@ -10,7 +10,7 @@
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
-const APP_VERSION = '25.11.2026 f'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
+const APP_VERSION = '26.11.2026 a'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
@@ -1916,7 +1916,9 @@ views.me = () => {
       <p>Hast du einen Testtermin eingetragen, plant die App so, dass jedes Wort vor dem Test oft genug drankommt – spätestens am Tag davor nochmal alle.</p>
       <p style="margin:0">Am besten jeden Tag 10 Minuten – dann bleiben die Wörter für immer im Kopf. 🧠</p>
     </div>
-    <p class="muted tiny center" style="margin-top:24px">Version ${APP_VERSION}${IS_TEST ? ' (Test)' : ''} · Texterkennung: Tesseract (Apache-2.0) · Schrift: Nunito (OFL) · alles läuft offline auf dem Gerät</p>`;
+    <div class="center" style="margin-top:24px"><button class="btn" id="checkupdate">🔄 Nach Updates suchen</button></div>
+    <p class="muted tiny center" style="margin-top:12px">Version ${APP_VERSION}${IS_TEST ? ' (Test)' : ''} · läuft unter ${esc(location.host + location.pathname)}</p>
+    <p class="muted tiny center">Texterkennung: Tesseract (Apache-2.0) · Schrift: Nunito (OFL) · alles läuft offline auf dem Gerät</p>`;
   $('#back').onclick = () => go('home');
   $('#editprof').onclick = editProfile;
   $$('[data-set]').forEach((segEl) => $$('button', segEl).forEach((b) => (b.onclick = () => {
@@ -1927,6 +1929,7 @@ views.me = () => {
     if (key === 'sound' && st.sound) sound(true);
   })));
   $('#export').onclick = exportData;
+  $('#checkupdate').onclick = forceUpdate;
   $('#ttstest').onclick = () => { const o = $('#ttsout'); o.classList.remove('hidden'); speechTest(o); };
   $('#import').onclick = () => $('#impfile').click();
   $('#impfile').onchange = (e) => e.target.files[0] && importFile(e.target.files[0]);
@@ -2680,9 +2683,27 @@ function verbTile() {
     <div class="muted small">${act.length ? `${act.length} ausgewählt · ${act.filter((v) => verbState(v.inf).box >= 4).length} sicher` : 'go – went – gone · Englisch'}</div></div><span class="chev">›</span></button></div>`;
 }
 
+// Offline-Speicher dieser App leeren und neu laden (Vokabeln bleiben erhalten – sie liegen nicht im Cache)
+async function forceUpdate() {
+  if (!navigator.onLine) return toast('Bitte zuerst mit dem Internet verbinden');
+  toast('Suche nach Updates …');
+  try {
+    const scope = new URL('./', location.href).pathname;
+    const regs = navigator.serviceWorker ? await navigator.serviceWorker.getRegistrations() : [];
+    for (const r of regs) if (new URL(r.scope).pathname === scope) await r.unregister();
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((k) => k.startsWith(scope) && !k.slice(scope.length).includes('/')).map((k) => caches.delete(k)));
+  } catch (e) { /* trotzdem neu laden */ }
+  setTimeout(() => location.reload(), 400);
+}
+
 /* ---------- Start ---------- */
 try { indexedDB.deleteDatabase('vokabeltrainer-fotos'); } catch (e) { /* nicht vorhanden */ }
 render();
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+    reg.update().catch(() => {});
+    // Beim Zurückholen der App aus dem Hintergrund nach Updates schauen
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+  }).catch(() => {});
 }

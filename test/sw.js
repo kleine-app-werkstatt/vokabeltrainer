@@ -2,7 +2,7 @@
 // Der Cache-Name enthält den Pfad, damit sich Test- und Echtversion (und andere Apps
 // auf derselben Domain) nicht gegenseitig die Caches löschen.
 const SCOPE = new URL(self.registration.scope).pathname; // z. B. /vokabeltrainer/ oder /vokabeltrainer/test/
-const VERSION = SCOPE + 'v17';
+const VERSION = SCOPE + 'v18';
 // Eigene ältere Caches dieser Version (oder alte Namen wie 'v9') – nie die einer anderen App/Version
 const isOwnOldCache = (k) => k !== VERSION && ((k.startsWith(SCOPE) && !k.slice(SCOPE.length).includes('/')) || /^v\d+$/.test(k));
 const CORE = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
@@ -23,8 +23,11 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   const isApp = /\/(index\.html|app\.js|styles\.css)?$/.test(new URL(req.url).pathname);
   if (isApp || req.mode === 'navigate') {
-    // App-Dateien: erst Netz (für Updates), sonst Cache
-    e.respondWith(fetch(req).then((res) => { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); return res; })
+    // App-Dateien: immer frisch aus dem Netz (am Browser-Zwischenspeicher vorbei), offline aus dem Cache
+    e.respondWith(fetch(req.url, { cache: 'no-store', credentials: 'same-origin' }).then((res) => {
+      if (res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
+      return res;
+    })
       .catch(() => caches.match(req, { ignoreSearch: true }).then((r) => r || caches.match('index.html'))));
     return;
   }
