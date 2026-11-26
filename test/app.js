@@ -17,7 +17,7 @@ const IMPRINT = null;
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
-const APP_VERSION = '26.11.2026 b'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
+const APP_VERSION = '26.11.2026 c'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
@@ -2706,11 +2706,10 @@ async function forceUpdate() {
   setTimeout(() => location.reload(), 400);
 }
 
-// Einmalig beim ersten Einrichten: ein anonymes Signal „App wurde eingerichtet“ (keine Namen, keine Inhalte, keine Cookies)
+// Beim Einrichten (Tipp auf „Los geht's!“, passiert pro Installation einmal): ein anonymes Signal „App wurde eingerichtet“.
+// Bewusst OHNE Merker auf dem Gerät (nichts wird für den Zähler gespeichert oder ausgelesen), ohne Namen, ohne Cookies.
 function countFirstStart() {
   if (!COUNTER_CODE) return;
-  const flag = STORE_KEY + '.counted';
-  try { if (localStorage.getItem(flag)) return; localStorage.setItem(flag, '1'); } catch (e) { return; }
   const img = new Image();
   img.referrerPolicy = 'no-referrer';
   img.src = `https://${COUNTER_CODE}.goatcounter.com/count?p=${encodeURIComponent(IS_TEST ? '/erster-start-test' : '/erster-start')}&r=${Math.random().toString(36).slice(2)}`;
@@ -2726,7 +2725,7 @@ function privacySection() {
           <li><strong>Vorlesen</strong> nutzt die Sprachausgabe des Geräts.</li>
           <li><strong>Bereitstellung:</strong> Die App wird über GitHub Pages (GitHub Inc.) geladen. Dabei verarbeitet GitHub technisch notwendige Daten wie die IP-Adresse – wie bei jeder Webseite.</li>
           <li><strong>WhatsApp-Bericht, Sicherung, Kapitel teilen:</strong> nur, wenn du selbst tippst – dann an WhatsApp bzw. dorthin, wo du die Datei ablegst.</li>
-          ${COUNTER_CODE ? `<li><strong>Zähler:</strong> Beim allerersten Einrichten sendet die App einmalig ein anonymes Signal an GoatCounter, um zu zählen, wie oft sie eingerichtet wurde. Ohne Namen, ohne Inhalte, ohne Cookies.</li>` : ''}
+          ${COUNTER_CODE ? `<li><strong>Zähler:</strong> Beim Einrichten der App wird einmal ein anonymer Seitenaufruf an GoatCounter gesendet, um zu zählen, wie oft die App eingerichtet wurde. Ohne Namen, ohne Inhalte, ohne Cookies; auf dem Gerät wird dafür nichts gespeichert.</li>` : ''}
           <li>Keine Werbung, keine Analyse-Werkzeuge, keine KI-Dienste.</li>
         </ul>
       </details>

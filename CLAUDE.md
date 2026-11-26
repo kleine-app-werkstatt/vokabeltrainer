@@ -29,7 +29,8 @@ Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
 - Prüfungsmodus (Vokabeltest, Lückentext aus Beispielsätzen) läuft parallel und ändert den Karteikasten nicht.
 - Unregelmäßige Verben (Englisch): fertige Liste (~95, `IRREGULAR_VERBS`) + eigene; abgefragt Simple Past + Past Participle,
   eigener Karteikasten (`db.verbs`), „be“ verlangt was/were. Past Progressive bewusst nicht (regelmäßig: was/were + -ing).
-- Anonymer Zähler „erster Start“ (GoatCounter, Bild-Pixel, ein Signal pro Gerät) ist vorbereitet, aber AUS:
+- Anonymer Zähler „erster Start“ (GoatCounter, Bild-Pixel beim Abschluss des Einrichtens; bewusst KEIN Merker auf
+  dem Gerät, damit keine Einwilligung nach TDDDG nötig ist) ist vorbereitet, aber AUS:
   `COUNTER_CODE` in app.js leer. Einschalten erst ab Etappe 2 nach Anlegen eines GoatCounter-Kontos durch den Nutzer.
   `IMPRINT` (Impressum) ebenfalls leer; Abschnitt „Datenschutz & Impressum“ unter Mein Bereich.
 - WhatsApp-Bericht per wa.me-Link (Kind tippt auf Senden); Empfänger im Elternbereich mit PIN.
