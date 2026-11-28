@@ -30,8 +30,8 @@ Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
 - Unregelmäßige Verben (Englisch): fertige Liste (~95, `IRREGULAR_VERBS`) + eigene; abgefragt Simple Past + Past Participle,
   eigener Karteikasten (`db.verbs`), „be“ verlangt was/were. Past Progressive bewusst nicht (regelmäßig: was/were + -ing).
 - Anonymer Zähler „erster Start“ (GoatCounter, Bild-Pixel beim Abschluss des Einrichtens; bewusst KEIN Merker auf
-  dem Gerät, damit keine Einwilligung nach TDDDG nötig ist) ist vorbereitet, aber AUS:
-  `COUNTER_CODE` = kleine-app-werkstatt (Konto kleine-app-werkstatt.goatcounter.com angelegt), zuerst nur in test/ aktiv.
+  dem Gerät, damit keine Einwilligung nach TDDDG nötig ist) ist eingerichtet:
+  `COUNTER_CODE` = kleine-app-werkstatt (Konto kleine-app-werkstatt.goatcounter.com angelegt), in test/ aktiv, Echtversion erst nach „übernehmen“.
   `IMPRINT` (Impressum) ebenfalls leer; Abschnitt „Datenschutz & Impressum“ unter Mein Bereich.
 - WhatsApp-Bericht per wa.me-Link (Kind tippt auf Senden); Empfänger im Elternbereich mit PIN.
 - Kommerzialisierung vorerst nicht; Hinweise (App-Store-Abo vs. Web-Abo, Arbeitgeber, Datenschutz, Steuern) wurden besprochen.
@@ -39,6 +39,7 @@ Antworten an den Nutzer auf Deutsch, kurz und Schritt für Schritt.
 ## Technik
 - Texterkennung bei Buchseiten mit Tabellenlinien (`analyzeTable`/`tableRows` in app.js): Linien finden →
   Bild entlang der Linien begradigen + Beleuchtung ausgleichen → jede Spalte einzeln lesen (PSM 4) → Wörter
-  per Zeile/Spalte zuordnen; deutsche Spalte = kürzeste Einträge. Zum Vergleich wird immer auch klassisch
+  per Zeile/Spalte zuordnen; leere Zellen in Zeilen mit Inhalt werden einzeln (2× vergrößert, PSM 6) nachgelesen;
+  unsichere Kurz-Schnipsel werden verworfen; deutsche Spalte = kürzeste Einträge. Zum Vergleich wird immer auch klassisch
   gelesen (PSM 6, Standard von tesseract.js) und das Ergebnis mit mehr vollständigen Vokabeln genommen.
 - Reines HTML/CSS/JS ohne Build. Texterkennung tesseract.js (vendor/, Apache-2.0), Schrift Nunito (fonts/, OFL).

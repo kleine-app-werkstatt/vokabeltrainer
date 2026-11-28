@@ -17,7 +17,7 @@ const IMPRINT = null;
 // Testversion liegt unter /test/ und hat eigene, getrennte Daten
 const IS_TEST = /\/test\//.test(location.pathname);
 const STORE_KEY = 'vokabeltrainer.v1' + (IS_TEST ? '.test' : '');
-const APP_VERSION = '26.11.2026 d'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
+const APP_VERSION = '28.11.2026 a'; // bei jeder Änderung anpassen (sichtbar unter „Mein Bereich“)
 if (IS_TEST) document.documentElement.classList.add('is-test');
 const DAY = 24 * 60 * 60 * 1000;
 const INTERVALS = [0, 1, 3, 7, 14, 30]; // Tage bis zur nächsten Abfrage je Fach (0 = neu)
@@ -1060,7 +1060,9 @@ function tableRows(data, tbl) {
     const dots = /^(\.{2,}|…)$/.test(t); // „the … the“, „je … desto“
     const hasLetter = /\p{L}/u.test(t), twoLetters = /\p{L}{2}/u.test(t);
     const okConf = w.confidence >= 35 || (w.confidence >= 15 && /\p{L}{4}/u.test(t));
-    const keep = dots || (hasLetter && (twoLetters || w.confidence >= 80) && okConf);
+    // Unsichere Kurz-Schnipsel (z. B. „SE“, „ee“ von Linienresten) weglassen
+    const crumb = (/^[A-ZÄÖÜ]{1,3}[.,;:]?$/.test(t) && w.confidence < 75) || (/^[a-zäöü]{1,2}[.,;:]?$/.test(t) && w.confidence < 55);
+    const keep = dots || (hasLetter && (twoLetters || w.confidence >= 80) && okConf && !crumb);
     if (!keep) continue; // Linienreste, Bildrauschen
     words.push(w);
   }
@@ -1199,6 +1201,8 @@ function buildRows(lines) {
 // Überschriften, Seitenzahlen o. Ä. nicht vorab anhaken
 function looksLikeJunk(f, g) {
   if (!f || !g) return true;
+  if (/^[A-ZÄÖÜ\s.,]{1,4}$/.test(g.trim())) return true; // nur ein Kürzel in Großbuchstaben → Rauschen
+  if (/\b(hundred|thousand)\b/i.test(f) && f.split(/\s+/).length >= 3) return true; // Seitenzahl in Worten
   if (/^[\d\s.,:;·\-–]+$/.test(g) || /^[\d\s.,:;·\-–]+$/.test(f)) return true;
   if (/^(unit|unité|station|volet|lesson|leçon|chapter|chapitre|module|part|teil|seite|page|words|vocabulaire|wortschatz|vokabeln)\b/i.test(f)) return true;
   if (f.split(/\s+/).length > 6 || g.split(/\s+/).length > 8) return true;
@@ -1324,6 +1328,37 @@ views.scan = async () => {
         }
       } finally {
         await worker.setParameters({ tessedit_pageseg_mode: '6' }); // Standard von tesseract.js
+      }
+      // Zweiter Durchgang: leere Zellen in Zeilen, in denen sonst etwas steht, einzeln und vergrößert lesen
+      if (tbl.targets) {
+        const T = tbl.targets, nC = edges.length - 1;
+        const rowOf = (w) => T.filter((t) => t < (w.bbox.y0 + w.bbox.y1) / 2).length;
+        const colOf = (w) => tbl.cuts.filter((c) => c < w.bbox.x0 + (w.bbox.x1 - w.bbox.x0) * 0.3).length;
+        const filled = new Set();
+        for (const w of words) if (w.confidence >= 35 && /\p{L}{2}/u.test(w.text)) filled.add(rowOf(w) * 10 + colOf(w));
+        const rowsWithText = [...new Set([...filled].map((k) => Math.floor(k / 10)))].filter((r) => r >= 1 && r < T.length);
+        const todo = [];
+        for (const r of rowsWithText) for (let c = 0; c < nC; c++) if (!filled.has(r * 10 + c)) todo.push([r, c]);
+        const s2 = $('#pstatus');
+        if (s2 && todo.length) s2.textContent = 'Lücken werden nachgelesen …';
+        for (const [r, c] of todo.slice(0, 20)) {
+          const y0 = Math.max(0, Math.floor(T[r - 1] - 4)), y1 = Math.min(canvas.height, Math.ceil(T[r] + 4));
+          const x0 = Math.max(0, edges[c] - 8), x1 = Math.min(canvas.width, edges[c + 1] + 8);
+          if (y1 - y0 < 12 || x1 - x0 < 12) continue;
+          const z = 2, cell = document.createElement('canvas');
+          cell.width = (x1 - x0) * z; cell.height = (y1 - y0) * z;
+          const cctx = cell.getContext('2d');
+          cctx.imageSmoothingQuality = 'high';
+          cctx.drawImage(tbl.straight, x0, y0, x1 - x0, y1 - y0, 0, 0, cell.width, cell.height);
+          const { data } = await worker.recognize(cell, {}, { blocks: true });
+          if (cancelled) return;
+          for (const b of data.blocks || []) for (const pg of b.paragraphs || []) for (const ln of pg.lines || []) for (const w of ln.words || []) {
+            const bb = { x0: x0 + w.bbox.x0 / z, x1: x0 + w.bbox.x1 / z, y0: y0 + w.bbox.y0 / z, y1: y0 + w.bbox.y1 / z };
+            const cy = (bb.y0 + bb.y1) / 2;
+            if (cy <= T[r - 1] || cy >= T[r]) continue; // nur Wörter, die wirklich in dieser Zeile liegen
+            words.push({ ...w, bbox: bb });
+          }
+        }
       }
       rows = tableRows({ blocks: [{ paragraphs: [{ lines: [{ words }] }] }] }, tbl);
     }
